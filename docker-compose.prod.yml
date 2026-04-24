@@ -1,0 +1,57 @@
+# 運用サーバー（VPS）で使用する Compose。
+# GitHub Actions が GHCR に push した private イメージを pull して起動する。
+# ローカル開発用は引き続き docker-compose.yml を利用する。
+#
+# 事前準備（サーバー側、初回のみ）:
+#   1. このファイルと bookmarklet.iife.js は CI が SCP で配置する（DEPLOY_PATH 直下）。
+#   2. backend/.env を DEPLOY_PATH/backend/.env に配置（REDIS_PASSWORD / TURNSTILE_SECRET_KEY / SMTP_* など）。
+#   3. ジャケット画像ディレクトリを DEPLOY_PATH/assets/jacket に配置。
+#   4. GHCR pull 権限付き PAT で `docker login ghcr.io` を 1 回実行。
+#
+# デプロイ:
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: >
+      sh -c "redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""
+    env_file:
+      - ./backend/.env
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  backend:
+    image: ghcr.io/sappagetti/chinatsu-info-backend:${IMAGE_TAG:-latest}
+    pull_policy: always
+    env_file:
+      - ./backend/.env
+    environment:
+      DB_PATH: /data/app.db
+      REDIS_ADDR: redis:6379
+      BOOKMARKLET_TEMPLATE_PATH: /app/bookmarklet.iife.js
+      JACKET_DIR: /assets/jacket
+      ICON_DIR: /data/icons
+      CHARA_DIR: /data/chara
+    depends_on:
+      - redis
+    volumes:
+      - backend_data:/data
+      - ./bookmarklet.iife.js:/app/bookmarklet.iife.js:ro
+      - ./assets/jacket:/assets/jacket:ro
+    restart: unless-stopped
+
+  frontend:
+    image: ghcr.io/sappagetti/chinatsu-info-frontend:${IMAGE_TAG:-latest}
+    pull_policy: always
+    depends_on:
+      - backend
+    ports:
+      - "8081:80"
+    restart: unless-stopped
+
+volumes:
+  backend_data:
+  redis_data:

@@ -1,0 +1,73 @@
+name: Rollback
+
+# main push 로는 트리거되지 않는다. Actions UI 의 "Run workflow" 버튼에서 태그를 지정해 수동 실행.
+# 예: 최신 배포가 망가졌을 때 한 커밋 전 이미지로 되돌릴 때.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "GHCR 이미지 태그 (예: sha-abc1234, latest)"
+        required: true
+        default: latest
+
+# 일반 배포와 같은 그룹을 써서 deploy.yml 과 동시에 돌지 않게 한다.
+concurrency:
+  group: deploy-refs/heads/main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+      # 입력 태그는 GHCR 태그 문법(영숫자/._-)만 허용.
+      # workflow_dispatch 는 write 권한자만 누를 수 있지만, 오입력 방지/셸 치환 방어 차원.
+      - name: Validate tag input
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+            echo "::error::invalid tag: must match ^[A-Za-z0-9._-]+$"
+            exit 1
+          fi
+
+      - name: Rollback on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          envs: DEPLOY_PATH,IMAGE_TAG
+          script_stop: true
+          script: |
+            set -eu
+            cd "$DEPLOY_PATH"
+            echo "Rolling back to IMAGE_TAG=$IMAGE_TAG"
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d
+
+            # 배포 후 healthcheck. 롤백도 망가지면 즉시 빨간 X 로 알림.
+            ok=""
+            for i in 1 2 3 4 5 6 7 8; do
+              if docker compose -f docker-compose.prod.yml exec -T backend \
+                   wget -q --spider http://127.0.0.1:8080/healthz; then
+                echo "backend healthz ok (attempt $i)"
+                ok=1
+                break
+              fi
+              echo "waiting for backend... ($i/8)"
+              sleep 3
+            done
+            if [ -z "$ok" ]; then
+              echo "::error::backend healthz FAILED after rollback"
+              docker compose -f docker-compose.prod.yml ps
+              docker compose -f docker-compose.prod.yml logs --tail=200
+              exit 1
+            fi
+            echo "rollback healthcheck passed ($IMAGE_TAG)"
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          IMAGE_TAG: ${{ inputs.tag }}

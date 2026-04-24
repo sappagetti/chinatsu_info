@@ -1,0 +1,21 @@
+# Secrets / local env
+# VITE_* は build-args で明示的に渡すため、ここでは .env を一切入れない。
+.env
+.env.*
+!.env.example
+
+# Dependencies / build output (イメージ内で npm install / build する)
+node_modules
+dist
+
+# Git / IDE / OS noise
+.git
+.gitignore
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
+
+# Docs / misc
+README.md

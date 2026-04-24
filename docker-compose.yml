@@ -1,0 +1,48 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: >
+      sh -c "redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""
+    env_file:
+      - ./backend/.env
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      DB_PATH: /data/app.db
+      REDIS_ADDR: redis:6379
+      BOOKMARKLET_TEMPLATE_PATH: /app/bookmarklet.iife.js
+      JACKET_DIR: /assets/jacket
+      ICON_DIR: /data/icons
+      CHARA_DIR: /data/chara
+    depends_on:
+      - redis
+    volumes:
+      - backend_data:/data
+      - ./frontend/public/bookmarklet.iife.js:/app/bookmarklet.iife.js:ro
+      - ./assets/jacket:/assets/jacket:ro
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
+        VITE_BOOKMARKLET_API_URL: ${VITE_BOOKMARKLET_API_URL:-}
+        VITE_BEATMAP_BUCKET_URL: ${VITE_BEATMAP_BUCKET_URL:-}
+        VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
+    depends_on:
+      - backend
+    ports:
+      - "8081:80"
+    restart: unless-stopped
+
+volumes:
+  backend_data:
+  redis_data:

@@ -1,0 +1,244 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# main 브랜치 배포는 동시에 하나만 돌도록 직렬화.
+# 진행 중인 빌드는 그대로 끝내 둬서 중간 단계가 꼬이지 않게 한다.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+# 기본은 최소 권한. packages:write 는 build-and-push 잡에서만 별도로 부여한다.
+permissions:
+  contents: read
+
+env:
+  IMAGE_BACKEND: ghcr.io/${{ github.repository_owner }}/chinatsu-info-backend
+  IMAGE_FRONTEND: ghcr.io/${{ github.repository_owner }}/chinatsu-info-frontend
+
+jobs:
+  # 빌드/배포 전에 테스트가 먼저. 깨진 코드가 이미지로 나가는 걸 막는다.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: backend/go.sum
+
+      - name: Backend vet & test
+        working-directory: backend
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            bookmarklet/package-lock.json
+
+      - name: Frontend install
+        working-directory: frontend
+        run: npm ci
+
+      - name: Frontend typecheck
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+      - name: Frontend unit tests
+        working-directory: frontend
+        run: npm test
+
+      - name: Bookmarklet install & build (smoke)
+        working-directory: bookmarklet
+        run: |
+          npm ci
+          npm run build
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      sha_short: ${{ steps.vars.outputs.sha_short }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: vars
+        run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # git 에 커밋된 bookmarklet.iife.js 에 의존하지 않도록 CI 에서 매번 재생성.
+      # 개발자가 소스만 고치고 리빌드를 깜빡한 채 push 해도 서버에는 최신 버전이 나간다.
+      - name: Set up Node (for bookmarklet)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: bookmarklet/package-lock.json
+
+      - name: Rebuild bookmarklet
+        working-directory: bookmarklet
+        run: |
+          npm ci
+          npm run build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Backend metadata
+        id: meta_backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_BACKEND }}
+          tags: |
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta_backend.outputs.tags }}
+          labels: ${{ steps.meta_backend.outputs.labels }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Frontend metadata
+        id: meta_frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_FRONTEND }}
+          tags: |
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # 프론트는 빌드 시점에 VITE_* 를 이미지에 구워야 한다.
+      # 이 값들은 모두 브라우저에 노출되는 공개 값이지만 secret 으로 관리하여 변경 이력을 추적한다.
+      - name: Build & push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: ${{ steps.meta_frontend.outputs.tags }}
+          labels: ${{ steps.meta_frontend.outputs.labels }}
+          build-args: |
+            VITE_API_URL=${{ secrets.VITE_API_URL }}
+            VITE_BOOKMARKLET_API_URL=${{ secrets.VITE_BOOKMARKLET_API_URL }}
+            VITE_BEATMAP_BUCKET_URL=${{ secrets.VITE_BEATMAP_BUCKET_URL }}
+            VITE_TURNSTILE_SITE_KEY=${{ secrets.VITE_TURNSTILE_SITE_KEY }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # SCP 로 올릴 bookmarklet 도 최신 상태여야 하므로 deploy 잡에서도 재빌드.
+      - name: Set up Node (for bookmarklet)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: bookmarklet/package-lock.json
+
+      - name: Rebuild bookmarklet
+        working-directory: bookmarklet
+        run: |
+          npm ci
+          npm run build
+
+      - name: Prepare deploy bundle
+        run: |
+          mkdir -p deploy-bundle
+          cp docker-compose.prod.yml deploy-bundle/
+          cp frontend/public/bookmarklet.iife.js deploy-bundle/
+
+      - name: Copy bundle to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          source: "deploy-bundle/*"
+          target: ${{ secrets.DEPLOY_PATH }}
+          strip_components: 1
+          overwrite: true
+
+      - name: Pull, restart & healthcheck on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          envs: DEPLOY_PATH,IMAGE_TAG
+          script_stop: true
+          script: |
+            set -eu
+            cd "$DEPLOY_PATH"
+            echo "Deploying IMAGE_TAG=$IMAGE_TAG"
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d
+
+            # 배포 직후 healthcheck: backend /healthz 가 200 반환해야 성공.
+            # nginx 는 /api 만 프록시하므로 backend 컨테이너 내부에서 직접 호출한다.
+            ok=""
+            for i in 1 2 3 4 5 6 7 8; do
+              if docker compose -f docker-compose.prod.yml exec -T backend \
+                   wget -q --spider http://127.0.0.1:8080/healthz; then
+                echo "backend healthz ok (attempt $i)"
+                ok=1
+                break
+              fi
+              echo "waiting for backend... ($i/8)"
+              sleep 3
+            done
+            if [ -z "$ok" ]; then
+              echo "::error::backend healthz FAILED — dumping logs"
+              docker compose -f docker-compose.prod.yml ps
+              docker compose -f docker-compose.prod.yml logs --tail=200
+              exit 1
+            fi
+
+            # frontend nginx 가 index.html 을 서빙하는지도 확인.
+            if ! docker compose -f docker-compose.prod.yml exec -T frontend \
+                   wget -q --spider http://127.0.0.1/; then
+              echo "::error::frontend not serving — dumping logs"
+              docker compose -f docker-compose.prod.yml logs --tail=200 frontend
+              exit 1
+            fi
+
+            echo "deploy healthcheck passed"
+            docker image prune -f
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          IMAGE_TAG: sha-${{ needs.build-and-push.outputs.sha_short }}
