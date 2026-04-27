@@ -35,6 +35,9 @@ services:
       JACKET_DIR: /assets/jacket
       ICON_DIR: /data/icons
       CHARA_DIR: /data/chara
+      # Workdir is /app so ./data would be /app/data, not the named volume. Pin to /data.
+      MUSIC_EX_CACHE_PATH: /data/music-ex.json
+      MUSIC_EX_OVERRIDES_PATH: /data/music-ex-overrides.json
     depends_on:
       - redis
     volumes:
