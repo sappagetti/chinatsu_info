@@ -31,23 +31,33 @@ import (
 )
 
 const (
-	musicExDefaultSource    = "https://raw.githubusercontent.com/zvuc/otoge-db/master/ongeki/data/music-ex.json"
-	musicExDefaultCachePath = "./data/music-ex.json"
-	musicExRefreshInterval  = 24 * time.Hour
-	musicExRetryDelay       = 30 * time.Second
-	musicExHTTPTimeout      = 60 * time.Second
-	musicExMaxBodyBytes     = 32 * 1024 * 1024 // 32 MiB 안전 상한
+	musicExDefaultSource        = "https://raw.githubusercontent.com/zvuc/otoge-db/master/ongeki/data/music-ex.json"
+	musicExDefaultCachePath     = "./data/music-ex.json"
+	musicExDefaultOverridesPath = "./data/music-ex-overrides.json"
+	musicExRefreshInterval      = 24 * time.Hour
+	musicExRetryDelay           = 30 * time.Second
+	musicExHTTPTimeout          = 60 * time.Second
+	musicExMaxBodyBytes         = 32 * 1024 * 1024 // 32 MiB 안전 상한
 	// 브라우저가 캐시하는 최대 기간. 이 값이 만료되면 브라우저는 If-None-Match 로 조건부 GET 을 보낸다.
 	// 서버 자체 갱신이 24시간이라 짧게 잡아도 실수 내역이 크지 않다.
 	musicExBrowserMaxAge = 3600
+	// 오버라이드 파일 mtime 폴링 주기. 사용자가 파일을 편집하면 1분 안에 반영된다.
+	musicExOverridesWatchInterval = time.Minute
 )
 
 type musicExCache struct {
-	mu        sync.RWMutex
-	body      []byte
-	bodyHash  string // body sha256, 응답 ETag 로도 사용
-	remoteTag string // 업스트림 ETag. 조건부 GET 에 쓴다
-	fetchedAt time.Time
+	mu sync.RWMutex
+	// rawBody: 상류 (otoge-db) 에서 받아온 원본. 디스크 캐시는 항상 이 값.
+	rawBody []byte
+	rawHash string
+	// mergedBody: rawBody + 오버라이드 머지 결과. HTTP 응답에 쓰는 본체.
+	mergedBody []byte
+	mergedHash string // 응답 ETag 의 소스
+	remoteTag  string // 업스트림 ETag. 조건부 GET 에 쓴다
+	fetchedAt  time.Time
+
+	overridesPath  string
+	overridesMtime time.Time // 마지막으로 머지에 사용한 오버라이드 파일의 mtime
 
 	sourceURL string
 	cachePath string
@@ -56,9 +66,10 @@ type musicExCache struct {
 
 func newMusicExCache() *musicExCache {
 	return &musicExCache{
-		sourceURL: mustEnv("MUSIC_EX_SOURCE_URL", musicExDefaultSource),
-		cachePath: mustEnv("MUSIC_EX_CACHE_PATH", musicExDefaultCachePath),
-		http:      &http.Client{Timeout: musicExHTTPTimeout},
+		sourceURL:     mustEnv("MUSIC_EX_SOURCE_URL", musicExDefaultSource),
+		cachePath:     mustEnv("MUSIC_EX_CACHE_PATH", musicExDefaultCachePath),
+		overridesPath: mustEnv("MUSIC_EX_OVERRIDES_PATH", musicExDefaultOverridesPath),
+		http:          &http.Client{Timeout: musicExHTTPTimeout},
 	}
 }
 
@@ -70,9 +81,10 @@ func (c *musicExCache) start(ctx context.Context) {
 		}
 	} else {
 		log.Printf("music-ex: loaded disk cache (%d bytes, mtime=%s)",
-			len(c.body), c.fetchedAt.UTC().Format(time.RFC3339))
+			len(c.rawBody), c.fetchedAt.UTC().Format(time.RFC3339))
 	}
 	go c.runLoop(ctx)
+	go c.watchOverrides(ctx)
 }
 
 func (c *musicExCache) runLoop(ctx context.Context) {
@@ -103,7 +115,7 @@ func (c *musicExCache) initialRefresh(ctx context.Context) {
 	}
 	// 디스크 캐시가 아예 없으면 짧게 한 번 더 시도한다.
 	c.mu.RLock()
-	hasBody := len(c.body) > 0
+	hasBody := len(c.rawBody) > 0
 	c.mu.RUnlock()
 	if hasBody {
 		return
@@ -130,12 +142,15 @@ func (c *musicExCache) loadFromDisk() error {
 	}
 	info, _ := os.Stat(c.cachePath)
 	c.mu.Lock()
-	c.body = b
-	c.bodyHash = sha256Hex(b)
+	c.rawBody = b
+	c.rawHash = sha256Hex(b)
 	if info != nil {
 		c.fetchedAt = info.ModTime()
 	}
 	c.mu.Unlock()
+	if err := c.applyOverrides(); err != nil {
+		log.Printf("music-ex: apply overrides on disk load: %v", err)
+	}
 	return nil
 }
 
@@ -190,35 +205,127 @@ func (c *musicExCache) refresh(ctx context.Context) error {
 	remoteTag := strings.TrimSpace(resp.Header.Get("ETag"))
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if hash != c.bodyHash {
+	if hash != c.rawHash {
 		if err := os.MkdirAll(filepath.Dir(c.cachePath), 0o755); err != nil {
+			c.mu.Unlock()
 			return fmt.Errorf("mkdir cache dir: %w", err)
 		}
 		tmp := c.cachePath + ".tmp"
 		if err := os.WriteFile(tmp, body, 0o644); err != nil {
+			c.mu.Unlock()
 			return fmt.Errorf("write tmp cache: %w", err)
 		}
 		if err := os.Rename(tmp, c.cachePath); err != nil {
 			_ = os.Remove(tmp)
+			c.mu.Unlock()
 			return fmt.Errorf("rename cache: %w", err)
 		}
 	}
-	c.body = body
-	c.bodyHash = hash
+	c.rawBody = body
+	c.rawHash = hash
 	c.remoteTag = remoteTag
 	c.fetchedAt = time.Now()
+	c.mu.Unlock()
+
+	if err := c.applyOverrides(); err != nil {
+		log.Printf("music-ex: apply overrides after refresh: %v", err)
+	}
 	return nil
+}
+
+// applyOverrides: 현재 rawBody 위에 오버라이드 파일을 머지해 mergedBody 를 갱신한다.
+// 호출 시점:
+//   - 디스크 캐시 로드 직후
+//   - 상류 refresh 직후 (rawBody 갱신 후)
+//   - watchOverrides goroutine 이 mtime 변화 감지 시
+//
+// 오버라이드 파일이 없거나 깨졌으면 mergedBody = rawBody.
+func (c *musicExCache) applyOverrides() error {
+	c.mu.RLock()
+	raw := c.rawBody
+	c.mu.RUnlock()
+	if len(raw) == 0 {
+		return nil
+	}
+
+	var mtime time.Time
+	if info, statErr := os.Stat(c.overridesPath); statErr == nil {
+		mtime = info.ModTime()
+	}
+
+	overrides, err := loadMusicExOverridesFile(c.overridesPath)
+	if err != nil {
+		// 파싱 실패 — raw 그대로 서빙되도록 mergedBody 를 raw 로 맞춰둔다.
+		c.setMergedBody(raw, mtime)
+		return err
+	}
+	merged, applied, err := applyMusicExOverrides(raw, overrides)
+	if err != nil {
+		c.setMergedBody(raw, mtime)
+		return err
+	}
+	c.setMergedBody(merged, mtime)
+	if applied > 0 {
+		log.Printf("music-ex: applied %d override field group(s) from %s", applied, c.overridesPath)
+	}
+	return nil
+}
+
+func (c *musicExCache) setMergedBody(merged []byte, mtime time.Time) {
+	hash := sha256Hex(merged)
+	c.mu.Lock()
+	c.mergedBody = merged
+	c.mergedHash = hash
+	c.overridesMtime = mtime
+	c.mu.Unlock()
+}
+
+// watchOverrides: 오버라이드 파일 mtime 을 1분마다 폴링해 변경을 반영한다.
+// fsnotify 같은 외부 의존을 추가하지 않기 위한 단순 구현. 1분 정도면 운영 편집
+// 후 반영 지연으로 충분히 짧다.
+func (c *musicExCache) watchOverrides(ctx context.Context) {
+	if c.overridesPath == "" {
+		return
+	}
+	t := time.NewTicker(musicExOverridesWatchInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			var newMtime time.Time
+			if info, err := os.Stat(c.overridesPath); err == nil {
+				newMtime = info.ModTime()
+			}
+			c.mu.RLock()
+			lastMtime := c.overridesMtime
+			c.mu.RUnlock()
+			// 둘 다 zero (파일 없음) 이거나 mtime 동일이면 skip.
+			if newMtime.Equal(lastMtime) {
+				continue
+			}
+			if err := c.applyOverrides(); err != nil {
+				log.Printf("music-ex: apply overrides (watcher) failed: %v", err)
+			}
+		}
+	}
 }
 
 // serveHTTP: `GET /api/v1/music-ex.json` 핸들러.
 // ETag 는 body sha256 (앞 16자) 로 만들고, If-None-Match 일치시 304 반환.
+//
+// 응답 본문은 "오버라이드 머지본" (mergedBody). mergedBody 가 아직 준비되지 않은
+// 짧은 윈도우 (예: applyOverrides 호출 직전) 에는 rawBody 로 폴백한다.
 func (c *musicExCache) serveHTTP() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c.mu.RLock()
-		body := c.body
-		hash := c.bodyHash
+		body := c.mergedBody
+		hash := c.mergedHash
+		if len(body) == 0 {
+			body = c.rawBody
+			hash = c.rawHash
+		}
 		fetchedAt := c.fetchedAt
 		c.mu.RUnlock()
 
