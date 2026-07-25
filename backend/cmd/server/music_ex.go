@@ -59,9 +59,23 @@ type musicExCache struct {
 	overridesPath  string
 	overridesMtime time.Time // 마지막으로 머지에 사용한 오버라이드 파일의 mtime
 
+	// snapshot 캐시: mergedBody 를 파싱한 결과.
+	// 서버 내부에서 catalog lookup (rating_targets 등) 에 사용.
+	// 매 요청마다 parse 하면 비싸므로 mergedHash 로 invalidate.
+	snapshotHash    string
+	snapshotByID    map[int]map[string]any
+	snapshotByTitle map[string]map[string]any
+
 	sourceURL string
 	cachePath string
 	http      *http.Client
+}
+
+// musicExSnapshot: catalog lookup 용 인덱스. Snapshot() 가 리턴한다.
+// nil 이면 아직 mergedBody 가 준비 안 됨 (기동 직후 등).
+type musicExSnapshot struct {
+	ByID    map[int]map[string]any
+	ByTitle map[string]map[string]any
 }
 
 func newMusicExCache() *musicExCache {
@@ -360,6 +374,59 @@ func (c *musicExCache) serveHTTP() http.HandlerFunc {
 		}
 		_, _ = w.Write(body)
 	}
+}
+
+// Snapshot: mergedBody 를 파싱한 catalog 인덱스를 리턴한다.
+// - id 인덱스 + title 인덱스 (title 은 normalizeTitle 결과 키).
+// - mergedHash 가 바뀌지 않았으면 캐시 재활용, 바뀌었으면 재파싱.
+// - mergedBody 가 아직 없으면 nil.
+//
+// 신곡 처리 흐름:
+//   payload.music_catalog[mxid] 매칭 실패 (bookmarklet 데이터가 catalog 를
+//   못 만든 경우) → 서버 catalog[mxid] → 서버 catalog[normalizeTitle] 순으로
+//   찾는다. 마지막 title 매칭이 있어야 우리가 overrides.json 에 추가한
+//   신곡 entry (임의 id) 도 잡힌다.
+func (c *musicExCache) Snapshot() *musicExSnapshot {
+	c.mu.RLock()
+	if c.snapshotHash != "" && c.snapshotHash == c.mergedHash {
+		snap := &musicExSnapshot{ByID: c.snapshotByID, ByTitle: c.snapshotByTitle}
+		c.mu.RUnlock()
+		return snap
+	}
+	body := c.mergedBody
+	hash := c.mergedHash
+	c.mu.RUnlock()
+
+	if len(body) == 0 {
+		return nil
+	}
+
+	var arr []map[string]any
+	if err := json.Unmarshal(body, &arr); err != nil {
+		return nil
+	}
+	byID := make(map[int]map[string]any, len(arr))
+	byTitle := make(map[string]map[string]any, len(arr))
+	for _, item := range arr {
+		if id := toInt(item["id"]); id > 0 {
+			byID[id] = item
+		}
+		if title, _ := item["title"].(string); title != "" {
+			key := normalizeTitle(title)
+			if key != "" && byTitle[key] == nil {
+				byTitle[key] = item
+			}
+		}
+	}
+
+	c.mu.Lock()
+	// 그 사이 mergedHash 가 다시 바뀌었을 수도 있지만, 여기 저장하는 인덱스는
+	// 지금 hash 기준. 다른 goroutine 이 곧 다시 파싱해줄 뿐 논리적 문제는 없음.
+	c.snapshotHash = hash
+	c.snapshotByID = byID
+	c.snapshotByTitle = byTitle
+	c.mu.Unlock()
+	return &musicExSnapshot{ByID: byID, ByTitle: byTitle}
 }
 
 func sha256Hex(b []byte) string {

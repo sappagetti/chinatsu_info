@@ -32,9 +32,18 @@ export function parseConst(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-export function isRefreshVersion(version: string | undefined): boolean {
-  const v = (version ?? "").normalize("NFKC").replace(/\s+/g, "").toLowerCase();
-  return v.includes("re:fresh") || v.includes("refresh");
+/**
+ * 게임의 "신곡 카테고리" (최신 확장의 신곡 풀) 에 속하는지 판정한다.
+ *
+ * SEGA 공식 music.json 은 새 확장이 나올 때 그 확장 신곡들의 `version` 필드를
+ * 한동안 비운 상태로 노출한다 (다음 소규모 업데이트 시점에 이전 확장 이름 —
+ * 예: "Re:Fresh" 로 채워 넣음). 게임 안의 "신곡 카테고리" 판정도 이 시점을
+ * 기준으로 동작하므로, 우리 쪽에서는 `version` 이 비어있는 곡을 신곡으로 본다.
+ *
+ * 백엔드 `isNewCategorySong` (rating_targets.go) 와 시맨틱을 맞출 것.
+ */
+export function isNewCategorySong(version: string | undefined): boolean {
+  return (version ?? "").trim() === "";
 }
 
 /**

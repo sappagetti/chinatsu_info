@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +30,7 @@ type ratedRow struct {
 	ResolvedVersion    string  `json:"-"`
 }
 
-func handleRatingTargets(st *store.Store) http.HandlerFunc {
+func handleRatingTargets(st *store.Store, mc *musicExCache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := bearerToken(r)
 		if token == "" {
@@ -51,12 +52,16 @@ func handleRatingTargets(st *store.Store) http.HandlerFunc {
 			})
 			return
 		}
-		rows := extractRatedRowsFromPayload(snap.Payload)
+		// 서버가 미러링·오버라이드 머지한 music-ex.json 을 payload catalog 의
+		// 보조 소스로 쓴다. 신곡은 payload 안 catalog 에 mxid 가 없이 오므로
+		// (bookmarklet 소스에도 아직 없음) 서버 catalog 를 title 로 매칭해야
+		// 정수 (`lev_*_i`) 를 얻을 수 있다.
+		rows := extractRatedRowsFromPayload(snap.Payload, mc.Snapshot())
 		newPool := make([]ratedRow, 0, len(rows))
 		oldPool := make([]ratedRow, 0, len(rows))
 		platPool := make([]ratedRow, 0, len(rows))
 		for _, rr := range rows {
-			if isRefreshVersion(rr) {
+			if isNewCategorySong(rr) {
 				newPool = append(newPool, rr)
 			} else {
 				oldPool = append(oldPool, rr)
@@ -215,9 +220,22 @@ func calcPlatinumRate(constVal float64, star int) float64 {
 	return (constVal * constVal * float64(s)) / 1000
 }
 
-func isRefreshVersion(rr ratedRow) bool {
-	v := strings.ToLower(strings.Join(strings.Fields(rr.ResolvedVersion), ""))
-	return strings.Contains(v, "re:fresh") || strings.Contains(v, "refresh")
+// isNewCategorySong: 게임의 "신곡 카테고리" (최신 확장 신곡 풀) 여부.
+//
+// SEGA 공식 music.json 은 새 확장 신곡의 `version` 필드를 한동안 비운다
+// (다음 서버 업데이트 때 이전 확장 이름 — 예: "Re:Fresh" — 을 채워 넣음).
+// 게임 내 "신곡 카테고리" 판정도 이 시점과 맞물려 동작하므로, 여기서는
+// resolved version 이 비어있는 곡을 신곡으로 본다. 프론트
+// `isNewCategorySong` (ratingCalc.ts) 과 시맨틱을 맞춰야 한다.
+//
+// 신곡의 resolvedVersion 이 비어있는 이유는 두 가지가 모두 성립할 때:
+//   1) payload score 의 version 값이 "" (SEGA 미태깅)
+//   2) 서버 catalog fallback 도 version 값을 채우지 못함
+//      (신곡 catalog entry 를 아직 overrides 에 안 넣었거나 version 필드 없음)
+// 즉 overrides 에서 신곡 entry 에 `"version": "Re:Fresh"` 를 명시적으로
+// 넣으면 그 순간부터 구곡 pool 로 옮겨간다.
+func isNewCategorySong(rr ratedRow) bool {
+	return strings.TrimSpace(rr.ResolvedVersion) == ""
 }
 
 func isBonusTrackText(v string) bool {
@@ -231,12 +249,25 @@ func isBonusTrackText(v string) bool {
 		strings.Contains(t, "bonus")
 }
 
+// parseFloat: JSON any 값을 float64 로 파싱.
+// music-ex.json / catalog 의 `lev_*_i` 는 실제로는 문자열 ("14.6") 로 저장되므로
+// 반드시 string 케이스를 함께 처리해야 한다.
 func parseFloat(v any) (float64, bool) {
 	switch t := v.(type) {
 	case float64:
 		return t, true
 	case int:
 		return float64(t), true
+	case string:
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return 0, false
+		}
+		return f, true
 	default:
 		return 0, false
 	}
@@ -262,7 +293,31 @@ func catalogConstByDifficulty(cat map[string]any, difficulty string) (float64, b
 	return parseFloat(cat[field])
 }
 
-func extractRatedRowsFromPayload(payload map[string]any) []ratedRow {
+// lookupCatalog: score row 하나에 대해 (catalog entry, matched) 를 3단으로 찾는다.
+//
+//  1. payload.music_catalog[mxid]  — bookmarklet 이 오게키-NET 에서 실시간 긁은 것
+//  2. server music-ex.json[mxid]   — 서버 미러 (기존 곡, upstream 갱신 지연 있음)
+//  3. server music-ex.json[title]  — mxid 매칭 실패시 title 로. 신곡 (payload 에
+//     mxid 없이 오는 케이스) 과 우리 overrides.json 이 임의 id 로 추가한 신곡
+//     entry 를 이 단계에서 잡는다.
+func lookupCatalog(name string, mxid int, payloadByID map[int]map[string]any, srv *musicExSnapshot) map[string]any {
+	if cat, ok := payloadByID[mxid]; ok && mxid > 0 {
+		return cat
+	}
+	if srv != nil {
+		if cat, ok := srv.ByID[mxid]; ok && mxid > 0 {
+			return cat
+		}
+		if key := normalizeTitle(name); key != "" {
+			if cat, ok := srv.ByTitle[key]; ok {
+				return cat
+			}
+		}
+	}
+	return nil
+}
+
+func extractRatedRowsFromPayload(payload map[string]any, srv *musicExSnapshot) []ratedRow {
 	raw, ok := payload["scores"].([]any)
 	if !ok {
 		return []ratedRow{}
@@ -317,17 +372,37 @@ func extractRatedRowsFromPayload(payload map[string]any) []ratedRow {
 			continue
 		}
 		level := toString(row["level"])
+		cat := lookupCatalog(name, musicExID, catalogByID, srv)
+		if cat != nil {
+			// 서버 catalog 에서도 bonus 판정 반영 (overrides 로 새로 추가된
+			// 곡이 bonus 태깅되어 있을 수 있음)
+			for _, v := range cat {
+				if isBonusTrackText(toString(v)) {
+					cat = nil
+					break
+				}
+			}
+			if cat == nil {
+				continue
+			}
+		}
 		constVal := 0.0
 		if c, ok := parseFloat(row["const"]); ok {
 			constVal = c
 		}
-		if cat, ok := catalogByID[musicExID]; ok {
+		if cat != nil {
 			if c, ok := catalogConstByDifficulty(cat, toString(row["difficulty"])); ok {
 				constVal = c
 			}
 		}
 		if constVal <= 0 {
 			continue
+		}
+		// version: payload score 우선 (SEGA 가 태깅 완료한 경우). 비어있으면
+		// 서버 catalog 의 version 필드로 fallback (overrides 로 채운 경우).
+		resolvedVersion := strings.TrimSpace(toString(row["version"]))
+		if resolvedVersion == "" && cat != nil {
+			resolvedVersion = strings.TrimSpace(toString(cat["version"]))
 		}
 		technical := toInt(row["technicalHighScore"])
 		fullBell := toBool(row["fullBell"])
@@ -347,7 +422,7 @@ func extractRatedRowsFromPayload(payload map[string]any) []ratedRow {
 			LampForRating:      lamp,
 			TechRate:           techRate,
 			PlatRate:           calcPlatinumRate(constVal, platStar),
-			ResolvedVersion:    toString(row["version"]),
+			ResolvedVersion:    resolvedVersion,
 		})
 	}
 	return out

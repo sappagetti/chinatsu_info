@@ -7,7 +7,7 @@ import {
   calcRankBonus,
   getLampForRating,
   isBonusTrackText,
-  isRefreshVersion,
+  isNewCategorySong,
   makeConstKey,
   normalizeTitle,
   parseConst,
@@ -45,16 +45,17 @@ describe("parseConst", () => {
   });
 });
 
-describe("isRefreshVersion", () => {
-  it("detects re:fresh / refresh variants", () => {
-    expect(isRefreshVersion("ONGEKI Re:fresh")).toBe(true);
-    expect(isRefreshVersion("onGeKi REFRESH")).toBe(true);
-    expect(isRefreshVersion(" Re : fresh ")).toBe(true);
+describe("isNewCategorySong", () => {
+  // 신곡 = version 필드가 아직 비어있는 곡 (SEGA 가 최신 확장 신곡에 태깅 전).
+  it("treats empty version as new category (신曲枠)", () => {
+    expect(isNewCategorySong("")).toBe(true);
+    expect(isNewCategorySong(undefined)).toBe(true);
+    expect(isNewCategorySong("   ")).toBe(true);
   });
-  it("returns false for non-refresh versions or undefined", () => {
-    expect(isRefreshVersion("ONGEKI bright MEMORY")).toBe(false);
-    expect(isRefreshVersion(undefined)).toBe(false);
-    expect(isRefreshVersion("")).toBe(false);
+  it("treats any non-empty version string as old category", () => {
+    expect(isNewCategorySong("Re:Fresh")).toBe(false);
+    expect(isNewCategorySong("bright MEMORY Act.2")).toBe(false);
+    expect(isNewCategorySong("ONGEKI")).toBe(false);
   });
 });
 

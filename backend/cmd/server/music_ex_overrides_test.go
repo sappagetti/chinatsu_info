@@ -164,11 +164,12 @@ func TestApplyOverrides_NumericValueAccepted(t *testing.T) {
 	}
 }
 
-func TestApplyOverrides_ZeroAppliedReturnsRawIdentity(t *testing.T) {
-	// 매칭 0건이면 같은 슬라이스가 반환되어야 한다 (불필요 재마샬 회피).
+func TestApplyOverrides_NoMatchAndNoTitleReturnsRawIdentity(t *testing.T) {
+	// id 는 있지만 매칭 대상 arr 에 없고, title 도 없으면 auto-add 도 발동하지
+	// 않아 applied=0. 이 경우 rawBody 를 그대로 돌려줘야 한다 (재마샬 회피).
 	raw := []byte(`[{"id":"1","title":"X","lev_mas_i":"13.0"}]`)
 	overrides, _ := parseMusicExOverrides([]byte(`[
-		{"title":"未知の曲","lev_mas_i":"99.9"}
+		{"id":"99999","lev_mas_i":"99.9"}
 	]`))
 	merged, applied, _ := applyMusicExOverrides(raw, overrides)
 	if applied != 0 {
@@ -179,7 +180,9 @@ func TestApplyOverrides_ZeroAppliedReturnsRawIdentity(t *testing.T) {
 	}
 }
 
-func TestParseOverrides_SkipsUnknownFieldsAndEmpty(t *testing.T) {
+func TestParseOverrides_KeepsUnknownFieldsForAddMode(t *testing.T) {
+	// parse 단계는 화이트리스트로 거르지 않는다 (add 모드에서 임의 필드가 필요할 수 있음).
+	// 대신 update 모드에서 화이트리스트 밖 필드가 무시되는지는 별도 apply 테스트로 검증.
 	overrides, err := parseMusicExOverrides([]byte(`[
 		{"title":"A","unknown_field":"x","lev_mas_i":"13.0"},
 		{"title":"B"},
@@ -194,16 +197,136 @@ func TestParseOverrides_SkipsUnknownFieldsAndEmpty(t *testing.T) {
 		for _, o := range overrides {
 			t.Logf("entry: id=%q title=%q fields=%v", o.id, o.title, o.fields)
 		}
-		t.Fatalf("len(overrides) = %d, want 1 (only A should remain)", len(overrides))
+		t.Fatalf("len(overrides) = %d, want 1 (only A should remain: B/C have no fields, others have no id+title)", len(overrides))
 	}
 	if overrides[0].title != "A" {
 		t.Errorf("overrides[0].title = %q, want A", overrides[0].title)
 	}
-	if _, ok := overrides[0].fields["unknown_field"]; ok {
-		t.Errorf("unknown_field should have been dropped")
+	if v, ok := overrides[0].fields["unknown_field"]; !ok || v != "x" {
+		t.Errorf("unknown_field = (%q, %v), want kept as (\"x\", true)", v, ok)
 	}
 	if overrides[0].fields["lev_mas_i"] != "13.0" {
 		t.Errorf("lev_mas_i = %q, want 13.0", overrides[0].fields["lev_mas_i"])
+	}
+}
+
+func TestApplyOverrides_UpdateModeIgnoresNonWhitelistedFields(t *testing.T) {
+	// 기존 곡 매칭 성공 시엔 화이트리스트(정수)만 반영해야 한다.
+	// title/artist/version 등을 실수로 override 에 넣어도 무시되어야 함.
+	raw := []byte(`[{"id":"1","title":"既存曲","artist":"元アーティスト","version":"bright MEMORY","lev_mas_i":""}]`)
+	overrides, err := parseMusicExOverrides([]byte(`[
+		{"id":"1","title":"変更しちゃった","artist":"変わっちゃった","version":"Re:Fresh","image_url":"x.png","lev_mas_i":"14.5"}
+	]`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	merged, applied, err := applyMusicExOverrides(raw, overrides)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("applied = %d, want 1", applied)
+	}
+	if got := extractField(t, merged, "既存曲", "lev_mas_i"); got != "14.5" {
+		t.Errorf("lev_mas_i = %q, want 14.5", got)
+	}
+	// 화이트리스트 밖 필드는 그대로여야 한다.
+	if got := extractField(t, merged, "既存曲", "artist"); got != "元アーティスト" {
+		t.Errorf("artist = %q, want 元アーティスト (unchanged)", got)
+	}
+	if got := extractField(t, merged, "既存曲", "version"); got != "bright MEMORY" {
+		t.Errorf("version = %q, want bright MEMORY (unchanged)", got)
+	}
+	if got := extractField(t, merged, "既存曲", "image_url"); got != "" {
+		t.Errorf("image_url = %q, want empty (unknown field must not be added on update)", got)
+	}
+}
+
+func TestApplyOverrides_AutoAppendNewSong(t *testing.T) {
+	// 매칭 실패 + title 있으면 신곡으로 append.
+	raw := []byte(`[{"id":"1","title":"既存曲","lev_mas_i":"13.0"}]`)
+	overrides, err := parseMusicExOverrides([]byte(`[
+		{"id":"900001","title":"熱異常","version":"Re:Fresh","lev_mas":"14","lev_mas_i":"14.6","lev_exc":"12","lev_exc_i":"12.0","image_url":"x.png"}
+	]`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	merged, applied, err := applyMusicExOverrides(raw, overrides)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("applied = %d, want 1", applied)
+	}
+	// 새 곡이 실제로 배열에 추가되었는지 (모든 필드 유지).
+	var arr []map[string]any
+	if err := json.Unmarshal(merged, &arr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(arr) != 2 {
+		t.Fatalf("len(arr) = %d, want 2", len(arr))
+	}
+	if got := extractField(t, merged, "熱異常", "id"); got != "900001" {
+		t.Errorf("id = %q, want 900001", got)
+	}
+	if got := extractField(t, merged, "熱異常", "version"); got != "Re:Fresh" {
+		t.Errorf("version = %q, want Re:Fresh (add mode preserves all fields)", got)
+	}
+	if got := extractField(t, merged, "熱異常", "lev_mas_i"); got != "14.6" {
+		t.Errorf("lev_mas_i = %q, want 14.6", got)
+	}
+	if got := extractField(t, merged, "熱異常", "lev_exc_i"); got != "12.0" {
+		t.Errorf("lev_exc_i = %q, want 12.0", got)
+	}
+	if got := extractField(t, merged, "熱異常", "image_url"); got != "x.png" {
+		t.Errorf("image_url = %q, want x.png (add mode keeps arbitrary fields)", got)
+	}
+	// 기존 곡은 손대지 않아야 한다.
+	if got := extractField(t, merged, "既存曲", "lev_mas_i"); got != "13.0" {
+		t.Errorf("既存曲 lev_mas_i = %q, want 13.0 (untouched)", got)
+	}
+}
+
+func TestApplyOverrides_IDMissTitleHitUpdatesInsteadOfAppend(t *testing.T) {
+	// 우리가 임의 id (900001) 로 신곡 override 를 만들었는데, upstream 이 나중에
+	// 실제 id (12345) 로 같은 title 의 곡을 넣었다고 가정. 다시 apply 하면
+	// id 매칭은 실패하지만 title 로 upstream row 를 잡아서 update 로 흡수해야 하고,
+	// catalog 에 중복 append 되면 안 된다.
+	raw := []byte(`[
+		{"id":"1","title":"既存曲","lev_mas_i":"13.0"},
+		{"id":"12345","title":"熱異常","version":"Re:Fresh","lev_mas":"14","lev_mas_i":""}
+	]`)
+	overrides, err := parseMusicExOverrides([]byte(`[
+		{"id":"900001","title":"熱異常","version":"bright MEMORY","lev_mas":"14","lev_mas_i":"14.6"}
+	]`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	merged, applied, err := applyMusicExOverrides(raw, overrides)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("applied = %d, want 1 (update, not add)", applied)
+	}
+	var arr []map[string]any
+	if err := json.Unmarshal(merged, &arr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(arr) != 2 {
+		t.Errorf("len(arr) = %d, want 2 (must NOT append duplicate)", len(arr))
+	}
+	// 정수는 override 로 채워짐 (update mode, upstream 이 비어있었으니 fill-only 통과).
+	if got := extractField(t, merged, "熱異常", "lev_mas_i"); got != "14.6" {
+		t.Errorf("lev_mas_i = %q, want 14.6", got)
+	}
+	// version 은 upstream 값이 유지되어야 함 (update mode 는 화이트리스트 밖 필드 무시).
+	if got := extractField(t, merged, "熱異常", "version"); got != "Re:Fresh" {
+		t.Errorf("version = %q, want Re:Fresh (upstream value preserved)", got)
+	}
+	// 원래 id 도 그대로.
+	if got := extractField(t, merged, "熱異常", "id"); got != "12345" {
+		t.Errorf("id = %q, want 12345 (upstream id preserved)", got)
 	}
 }
 

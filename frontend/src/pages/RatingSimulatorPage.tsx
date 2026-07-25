@@ -12,7 +12,7 @@ import {
   calcRankBonus,
   getLampForRating,
   isBonusTrackText,
-  isRefreshVersion,
+  isNewCategorySong,
   makeConstKey,
   normalizeTitle,
 } from "../lib/ratingCalc";
@@ -55,8 +55,8 @@ const musicExUrl = import.meta.env.VITE_BEATMAP_BUCKET_URL?.trim() ?? "";
 const SIM_STORAGE_PREFIX = "rating-sim-v1";
 
 function calcTotalRating(rows: RatedRow[]): CalcSummary {
-  const newPool = rows.filter((r) => isRefreshVersion(r.resolvedVersion)).sort((a, b) => b.techRate - a.techRate || b.technicalHighScore - a.technicalHighScore);
-  const oldPool = rows.filter((r) => !isRefreshVersion(r.resolvedVersion)).sort((a, b) => b.techRate - a.techRate || b.technicalHighScore - a.technicalHighScore);
+  const newPool = rows.filter((r) => isNewCategorySong(r.resolvedVersion)).sort((a, b) => b.techRate - a.techRate || b.technicalHighScore - a.technicalHighScore);
+  const oldPool = rows.filter((r) => !isNewCategorySong(r.resolvedVersion)).sort((a, b) => b.techRate - a.techRate || b.technicalHighScore - a.technicalHighScore);
   const platPool = rows.filter((r) => r.platinumHighScore > 0).sort((a, b) => b.platRate - a.platRate || b.platinumStar - a.platinumStar);
   const newContrib = Math.floor(((newPool.slice(0, NEW_COUNT).reduce((a, r) => a + r.techRate, 0) / NEW_COUNT) / 5) * 1000) / 1000;
   const oldContrib = Math.floor((oldPool.slice(0, OLD_COUNT).reduce((a, r) => a + r.techRate, 0) / OLD_COUNT) * 1000) / 1000;
@@ -65,11 +65,11 @@ function calcTotalRating(rows: RatedRow[]): CalcSummary {
 }
 function getTargetPools(rows: RatedRow[]): TargetPools {
   const newTop = rows
-    .filter((r) => isRefreshVersion(r.resolvedVersion))
+    .filter((r) => isNewCategorySong(r.resolvedVersion))
     .sort((a, b) => b.techRate - a.techRate || b.technicalHighScore - a.technicalHighScore)
     .slice(0, NEW_COUNT);
   const oldTop = rows
-    .filter((r) => !isRefreshVersion(r.resolvedVersion))
+    .filter((r) => !isNewCategorySong(r.resolvedVersion))
     .sort((a, b) => b.techRate - a.techRate || b.technicalHighScore - a.technicalHighScore)
     .slice(0, OLD_COUNT);
   const platTop = rows
