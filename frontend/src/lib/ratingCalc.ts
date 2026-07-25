@@ -10,14 +10,36 @@ export function normalizeTitle(s: string): string {
   return s.normalize("NFKC").replace(/\s+/g, "").trim().toLowerCase();
 }
 
+/**
+ * catalog entry (music-ex.json 의 한 곡) 가 게임 내 "보너스 트랙" 카테고리인지
+ * (= 레이팅 계산에서 제외해야 하는지) 판정한다.
+ *
+ * 판정:
+ *  1) `bonus` 필드 값 "1" — otoge-db upstream 이 실제로 이 방식으로 표기.
+ *     조사 시점 157 곡 (전부 CD 특전 "-<キャラ名>ソロver.-" 계열).
+ *  2) 필드 어딘가에 "ボーナス" / "bonus track" 문자열 (레거시 안전빵).
+ *
+ * 백엔드 `isBonusCatalogEntry` (rating_targets.go) 와 시맨틱을 맞출 것.
+ */
+export function isBonusTrackEntry(track: Record<string, unknown> | null | undefined): boolean {
+  if (!track) return false;
+  const b = track["bonus"];
+  if (typeof b === "string" && b.trim() === "1") return true;
+  for (const v of Object.values(track)) {
+    if (typeof v === "string" && isBonusTrackText(v)) return true;
+  }
+  return false;
+}
+
+/**
+ * 문자열 값에 bonus 라벨링이 포함되었는지 (레거시 텍스트 매칭).
+ * 현재 upstream 은 `bonus="1"` flag 로 표기하므로 실제 이 함수로 걸리는 케이스는
+ * 없지만, 표기 변경 대비 및 명시적 label 이 붙은 형태를 위해 유지.
+ * "bonus" 만으로 substring 매칭하면 곡 이름 등에서 오탐이 나올 수 있어 제외.
+ */
 export function isBonusTrackText(v: string): boolean {
   const t = v.normalize("NFKC").toLowerCase();
-  return (
-    t.includes("ボーナス") ||
-    t.includes("bonustrack") ||
-    t.includes("bonus track") ||
-    t.includes("bonus")
-  );
+  return t.includes("ボーナス") || t.includes("bonustrack") || t.includes("bonus track");
 }
 
 export function makeConstKey(title: string, difficulty: string): string {

@@ -244,6 +244,36 @@ func isNewCategorySong(rr ratedRow) bool {
 	return strings.TrimSpace(rr.ResolvedVersion) == ""
 }
 
+// isBonusCatalogEntry: 게임 내 "보너스 트랙" 카테고리 곡 (레이팅 계산 제외 대상) 인지.
+//
+// 판정 우선순위:
+//   1) `bonus` 필드 값이 "1"     — otoge-db upstream 이 실제로 이 방식으로 표기.
+//      2026-07 조사 시점 upstream 전체 곡 중 157 곡이 bonus="1", 이들은
+//      전부 "-<キャラ名>ソロver.-" 형식의 CD 특전 해금 곡.
+//   2) 필드 어딘가에 "bonus" 문자열 (레거시 안전빵) — 현재 upstream 데이터에는
+//      매칭되는 케이스가 없지만, 표기 변경 대비로 유지.
+//
+// 프론트 `isBonusTrack` (RatingSimulatorPage.tsx) 와 시맨틱을 맞출 것.
+func isBonusCatalogEntry(cat map[string]any) bool {
+	if cat == nil {
+		return false
+	}
+	if v, ok := cat["bonus"].(string); ok && strings.TrimSpace(v) == "1" {
+		return true
+	}
+	for _, v := range cat {
+		if s, ok := v.(string); ok && isBonusTrackText(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// isBonusTrackText: 문자열 값에 bonus 표기가 포함되었는지 (레거시).
+// 현재 upstream 은 `bonus="1"` flag 를 쓰므로 실제 매칭 케이스가 없지만
+// 표기 변경 대비 및 payload 안 catalog 의 문자열 필드 재활용을 위해 유지.
+// (완전히 "bonus" substring 만 잡으면 필드 값이 "1 bonus 이벤트" 같은 형태에서
+//  오탐 가능. 여기서는 명시적 라벨링 문자열만 인식.)
 func isBonusTrackText(v string) bool {
 	t := strings.ToLower(strings.TrimSpace(v))
 	if t == "" {
@@ -251,8 +281,7 @@ func isBonusTrackText(v string) bool {
 	}
 	return strings.Contains(t, "ボーナス") ||
 		strings.Contains(t, "bonus track") ||
-		strings.Contains(t, "bonustrack") ||
-		strings.Contains(t, "bonus")
+		strings.Contains(t, "bonustrack")
 }
 
 // parseFloat: JSON any 값을 float64 로 파싱.
@@ -341,14 +370,7 @@ func extractRatedRowsFromPayload(payload map[string]any, srv *musicExSnapshot) [
 			if id > 0 {
 				catalogByID[id] = cat
 			}
-			isBonus := false
-			for _, v := range cat {
-				if isBonusTrackText(toString(v)) {
-					isBonus = true
-					break
-				}
-			}
-			if !isBonus {
+			if !isBonusCatalogEntry(cat) {
 				continue
 			}
 			if id > 0 {
@@ -379,18 +401,10 @@ func extractRatedRowsFromPayload(payload map[string]any, srv *musicExSnapshot) [
 		}
 		level := toString(row["level"])
 		cat := lookupCatalog(name, musicExID, catalogByID, srv)
-		if cat != nil {
-			// 서버 catalog 에서도 bonus 판정 반영 (overrides 로 새로 추가된
-			// 곡이 bonus 태깅되어 있을 수 있음)
-			for _, v := range cat {
-				if isBonusTrackText(toString(v)) {
-					cat = nil
-					break
-				}
-			}
-			if cat == nil {
-				continue
-			}
+		// 서버 catalog fallback 을 통해 새로 붙은 entry 나 payload 안에 없던
+		// 곡이 bonus="1" 로 태깅되어 있으면 여기서도 제외.
+		if cat != nil && isBonusCatalogEntry(cat) {
+			continue
 		}
 		constVal := 0.0
 		if c, ok := parseFloat(row["const"]); ok {

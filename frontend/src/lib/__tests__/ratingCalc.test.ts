@@ -6,6 +6,7 @@ import {
   calcPlatinumRate,
   calcRankBonus,
   getLampForRating,
+  isBonusTrackEntry,
   isBonusTrackText,
   isNewCategorySong,
   makeConstKey,
@@ -60,15 +61,43 @@ describe("isNewCategorySong", () => {
 });
 
 describe("isBonusTrackText", () => {
-  it("detects Japanese and English bonus markers", () => {
+  it("detects explicit Japanese and English bonus track markers", () => {
     expect(isBonusTrackText("ボーナストラック")).toBe(true);
     expect(isBonusTrackText("Bonus Track")).toBe(true);
     expect(isBonusTrackText("BonusTrack")).toBe(true);
-    expect(isBonusTrackText("Pre-Bonus")).toBe(true);
+  });
+  it("does not match ambiguous substrings (previously false-positive on 'bonus')", () => {
+    // 곡 이름 등에 'bonus' 만 들어간 케이스에서 오탐 방지.
+    expect(isBonusTrackText("Pre-Bonus")).toBe(false);
+    expect(isBonusTrackText("BONUS!")).toBe(false);
   });
   it("returns false for unrelated text", () => {
     expect(isBonusTrackText("MASTER")).toBe(false);
     expect(isBonusTrackText("")).toBe(false);
+  });
+});
+
+describe("isBonusTrackEntry", () => {
+  // 게임 내 '보너스 트랙' 카테고리 판정. upstream 은 실제로 `bonus="1"` flag 로 표기.
+  it("detects entries with bonus flag = '1' (solo ver. songs)", () => {
+    expect(
+      isBonusTrackEntry({
+        title: "STARTLINER -星咲 あかりソロver.-",
+        category: "オンゲキ",
+        bonus: "1",
+      }),
+    ).toBe(true);
+  });
+  it("returns false for regular songs with bonus='' or missing", () => {
+    expect(isBonusTrackEntry({ title: "Distorted Fate", bonus: "" })).toBe(false);
+    expect(isBonusTrackEntry({ title: "POTENTIAL" })).toBe(false);
+  });
+  it("falls back to text markers when bonus flag is absent", () => {
+    expect(isBonusTrackEntry({ title: "Bonus Track Only", memo: "Bonus Track" })).toBe(true);
+  });
+  it("handles null/undefined safely", () => {
+    expect(isBonusTrackEntry(null)).toBe(false);
+    expect(isBonusTrackEntry(undefined)).toBe(false);
   });
 });
 

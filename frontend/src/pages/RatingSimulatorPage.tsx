@@ -11,7 +11,7 @@ import {
   calcPlatinumRate,
   calcRankBonus,
   getLampForRating,
-  isBonusTrackText,
+  isBonusTrackEntry,
   isNewCategorySong,
   makeConstKey,
   normalizeTitle,
@@ -144,14 +144,14 @@ export function RatingSimulatorPage() {
     const byId = catalogByID;
     const bonusTitleSet = new Set(
       catalog
-        .filter((t) => Object.values(t).some((v) => isBonusTrackText(String(v ?? ""))))
+        .filter((t) => isBonusTrackEntry(t as Record<string, unknown>))
         .map((t) => normalizeTitle(String(t.title ?? "")))
         .filter(Boolean),
     );
     return extractScoreRows(payload)
       .filter((r) => {
         const cat = r.music_ex_id ? byId.get(r.music_ex_id) : undefined;
-        if (cat && Object.values(cat).some((v) => isBonusTrackText(String(v ?? "")))) return false;
+        if (cat && isBonusTrackEntry(cat as Record<string, unknown>)) return false;
         if (bonusTitleSet.has(normalizeTitle(r.name))) return false;
         return true;
       })

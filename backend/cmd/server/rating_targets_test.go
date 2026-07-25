@@ -190,6 +190,114 @@ func TestCalcPlatinumRate_MatchesInGameTruncation(t *testing.T) {
 	}
 }
 
+// solo ver. (CD 특전) 곡은 upstream 이 bonus="1" flag 로 표기.
+// payload.music_catalog 에 있으면 그 곡은 rating 계산에서 제외되어야 한다.
+func TestExtractRatedRows_ExcludesSoloVerBonusSongs(t *testing.T) {
+	payload := map[string]any{
+		"scores": []any{
+			map[string]any{
+				"name":               "STARTLINER -星咲 あかりソロver.-",
+				"difficulty":         "MASTER",
+				"level":              "13",
+				"technicalHighScore": 1005000,
+				"version":            "RED",
+				"music_ex_id":        float64(999001),
+			},
+			map[string]any{
+				"name":               "Distorted Fate",
+				"difficulty":         "MASTER",
+				"level":              "15",
+				"technicalHighScore": 1005000,
+				"version":            "Re:Fresh",
+				"music_ex_id":        float64(999002),
+			},
+		},
+		"music_catalog": []any{
+			map[string]any{
+				"id":        float64(999001),
+				"title":     "STARTLINER -星咲 あかりソロver.-",
+				"category":  "オンゲキ",
+				"bonus":     "1",
+				"lev_mas_i": "13.5",
+			},
+			map[string]any{
+				"id":        float64(999002),
+				"title":     "Distorted Fate",
+				"category":  "VARIETY",
+				"bonus":     "",
+				"lev_mas_i": "15.1",
+			},
+		},
+	}
+	rows := extractRatedRowsFromPayload(payload, nil)
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1 (solo ver. song must be excluded)", len(rows))
+	}
+	if rows[0].Name != "Distorted Fate" {
+		t.Errorf("Name = %q, want Distorted Fate (solo ver. song should have been filtered out)", rows[0].Name)
+	}
+}
+
+// server catalog fallback (title match) 로 잡힌 신곡 entry 가 bonus="1" 이면 제외.
+func TestExtractRatedRows_ExcludesBonusFromServerCatalogFallback(t *testing.T) {
+	payload := map[string]any{
+		"scores": []any{
+			map[string]any{
+				"name":               "SoloVerSong",
+				"difficulty":         "MASTER",
+				"level":              "13",
+				"technicalHighScore": 1005000,
+				"version":            "",
+				"music_ex_id":        "",
+			},
+		},
+		"music_catalog": []any{},
+	}
+	srv := &musicExSnapshot{
+		ByID: map[int]map[string]any{},
+		ByTitle: map[string]map[string]any{
+			normalizeTitle("SoloVerSong"): {
+				"id":        "999003",
+				"title":     "SoloVerSong",
+				"bonus":     "1",
+				"lev_mas_i": "13.5",
+			},
+		},
+	}
+	rows := extractRatedRowsFromPayload(payload, srv)
+	if len(rows) != 0 {
+		t.Fatalf("len(rows) = %d, want 0 (bonus song from server catalog must be excluded)", len(rows))
+	}
+}
+
+// isBonusCatalogEntry 단위 테스트.
+func TestIsBonusCatalogEntry(t *testing.T) {
+	// bonus="1" flag (upstream 표기)
+	if !isBonusCatalogEntry(map[string]any{"title": "X ソロver.", "bonus": "1"}) {
+		t.Errorf("bonus='1' flag not detected")
+	}
+	// bonus="" 는 일반 곡
+	if isBonusCatalogEntry(map[string]any{"title": "Normal", "bonus": ""}) {
+		t.Errorf("bonus='' should not be flagged")
+	}
+	// bonus 필드 자체 없음
+	if isBonusCatalogEntry(map[string]any{"title": "Normal"}) {
+		t.Errorf("missing bonus field should not be flagged")
+	}
+	// 텍스트 fallback
+	if !isBonusCatalogEntry(map[string]any{"title": "Bonus Track"}) {
+		t.Errorf("text fallback (Bonus Track) not detected")
+	}
+	// nil 안전
+	if isBonusCatalogEntry(nil) {
+		t.Errorf("nil should not be flagged")
+	}
+	// 곡 이름에 우연히 "bonus" 만 들어간 케이스는 무시 (오탐 방지).
+	if isBonusCatalogEntry(map[string]any{"title": "Pre-Bonus Party"}) {
+		t.Errorf("substring 'bonus' alone should not trigger (only explicit label)")
+	}
+}
+
 // isNewCategorySong 단위 테스트: version 이 비어야 신곡.
 func TestIsNewCategorySong(t *testing.T) {
 	cases := []struct {
