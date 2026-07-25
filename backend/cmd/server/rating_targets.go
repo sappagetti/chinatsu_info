@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -209,6 +210,10 @@ func calcLampBonus(lamp string) float64 {
 	}
 }
 
+// calcPlatinumRate: P スコア レート.
+// (const^2 × star) / 1000. 게임 표기와 동일하게 소수 4자리 이하를 truncate.
+// 예: const=14.4, star=5 -> 1.0368 -> 1.036.
+// 프론트 `calcPlatinumRate` (ratingCalc.ts) 와 동일 시맨틱.
 func calcPlatinumRate(constVal float64, star int) float64 {
 	s := star
 	if s < 0 {
@@ -217,7 +222,8 @@ func calcPlatinumRate(constVal float64, star int) float64 {
 	if s > 5 {
 		s = 5
 	}
-	return (constVal * constVal * float64(s)) / 1000
+	raw := (constVal * constVal * float64(s)) / 1000
+	return math.Floor(raw*1000) / 1000
 }
 
 // isNewCategorySong: 게임의 "신곡 카테고리" (최신 확장 신곡 풀) 여부.

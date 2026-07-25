@@ -92,9 +92,18 @@ export function calcLampBonus(lamp: string): number {
   return 0;
 }
 
+/**
+ * P スコア レート = (const^2 × star) / 1000, 소수 4자리 이하를 절사한다.
+ *
+ * 게임 내 표기 규칙과 맞추기 위해 반올림이 아닌 truncate 를 쓴다.
+ * 예: const=14.4, star=5 → 14.4×14.4×5/1000 = 1.0368 → 1.036 (표기).
+ *
+ * 백엔드 `calcPlatinumRate` (rating_targets.go) 와 동일해야 함.
+ */
 export function calcPlatinumRate(constVal: number, star: number): number {
   const s = Math.max(0, Math.min(5, star));
-  return (constVal * constVal * s) / 1000;
+  const raw = (constVal * constVal * s) / 1000;
+  return Math.floor(raw * 1000) / 1000;
 }
 
 /** "14.0" → "14", 공백·전각 온점·일본어 온점 등을 정규화 */

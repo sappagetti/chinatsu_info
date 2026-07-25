@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"testing"
 )
 
@@ -156,6 +157,36 @@ func TestExtractRatedRows_NilServerSnapshot(t *testing.T) {
 	}
 	if rows[0].TechRate <= 0 {
 		t.Errorf("TechRate = %f, want > 0", rows[0].TechRate)
+	}
+}
+
+// calcPlatinumRate: 게임 표기와 정확히 일치해야 한다 (소수 3자리 절사, 반올림 X).
+// 예: 14.4 * 14.4 * 5 / 1000 = 1.0368 -> 게임은 1.036 으로 표기.
+func TestCalcPlatinumRate_MatchesInGameTruncation(t *testing.T) {
+	cases := []struct {
+		constVal float64
+		star     int
+		want     float64
+	}{
+		{14.4, 5, 1.036},
+		{15.7, 5, 1.232},
+		{15.6, 3, 0.730},
+		{12.9, 5, 0.832},
+		{11.5, 5, 0.661},
+		{14.5, 5, 1.051},
+		{15.0, 5, 1.125},
+		{10.0, 5, 0.5},
+		{10.4, 5, 0.54},
+		{10.7, 1, 0.114},
+		{15.0, 0, 0},
+		{15.0, -3, 0}, // clamp
+		{15.0, 99, 1.125}, // clamp
+	}
+	for _, c := range cases {
+		got := calcPlatinumRate(c.constVal, c.star)
+		if math.Abs(got-c.want) > 1e-9 {
+			t.Errorf("calcPlatinumRate(%.1f, %d) = %v, want %v", c.constVal, c.star, got, c.want)
+		}
 	}
 }
 

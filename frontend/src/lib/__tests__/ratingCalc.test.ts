@@ -115,11 +115,24 @@ describe("calcLampBonus", () => {
 });
 
 describe("calcPlatinumRate", () => {
-  it("clamps star count into [0,5] and applies (const^2 * star) / 1000", () => {
-    expect(approx(calcPlatinumRate(15, 5), (15 * 15 * 5) / 1000)).toBe(true);
-    expect(approx(calcPlatinumRate(15, 0), 0)).toBe(true);
-    expect(approx(calcPlatinumRate(15, -3), 0)).toBe(true);
-    expect(approx(calcPlatinumRate(15, 99), (15 * 15 * 5) / 1000)).toBe(true);
+  it("clamps star count into [0,5]", () => {
+    expect(calcPlatinumRate(15, 0)).toBe(0);
+    expect(calcPlatinumRate(15, -3)).toBe(0);
+    expect(calcPlatinumRate(15, 5)).toBe(calcPlatinumRate(15, 99));
+  });
+  // 게임 표기와 정확히 일치 (소수 3자리 절사). 사용자 제공 표에서 발췌.
+  it("matches in-game truncation (not rounding)", () => {
+    // 1.0368 → 1.036 (반올림이면 1.037 이 되어 오차)
+    expect(calcPlatinumRate(14.4, 5)).toBe(1.036);
+    expect(calcPlatinumRate(15.7, 5)).toBe(1.232);
+    expect(calcPlatinumRate(15.6, 3)).toBe(0.73);
+    expect(calcPlatinumRate(12.9, 5)).toBe(0.832);
+    expect(calcPlatinumRate(11.5, 5)).toBe(0.661);
+    expect(calcPlatinumRate(14.5, 5)).toBe(1.051);
+    expect(calcPlatinumRate(15, 5)).toBe(1.125);
+    expect(calcPlatinumRate(10, 5)).toBe(0.5);
+    expect(calcPlatinumRate(10.4, 5)).toBe(0.54);
+    expect(calcPlatinumRate(10.7, 1)).toBe(0.114);
   });
 });
 
