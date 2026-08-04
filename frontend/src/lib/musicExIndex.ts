@@ -18,7 +18,11 @@ type MusicExIndex = {
   constMap: Map<string, number>;
   /** title+difficulty → 모든 定数 후보(레벨별로 구분). 여러 버전 공존시 근사 매칭에 사용. */
   candidatesMap: Map<string, ConstCandidate[]>;
-  /** title+difficulty → 곡 버전 문자열. 신곡 판정에 활용. */
+  /**
+   * title+difficulty → catalog 버전 문자열.
+   * 참고: 신곡(新曲枠) 판정에는 쓰지 말 것 — score-row empty version 을
+   * catalog "Re:Fresh" 로 채우면 Act.2 신곡이 구곡 pool 로 오염된다.
+   */
   versionMap: Map<string, string>;
 };
 

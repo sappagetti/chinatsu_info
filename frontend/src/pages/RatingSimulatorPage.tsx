@@ -87,7 +87,6 @@ export function RatingSimulatorPage() {
   const [err, setErr] = useState<string | null>(null);
   const [payload, setPayload] = useState<Record<string, unknown> | null>(null);
   const [constMap, setConstMap] = useState<Map<string, number>>(new Map());
-  const [versionMap, setVersionMap] = useState<Map<string, string>>(new Map());
   const [scenarioMap, setScenarioMap] = useState<Record<string, ScenarioPatch>>({});
   const [constFilter, setConstFilter] = usePersistedState<string>("rating-sim.constFilter", "15+", {
     validate: (v) => typeof v === "string",
@@ -125,11 +124,8 @@ export function RatingSimulatorPage() {
       try {
         if (!musicExUrl) return;
         const data = await fetchMusicExJson(musicExUrl);
-        const { constMap: cm, versionMap: vm } = buildMusicExIndex(data);
-        if (!cancelled) {
-          setConstMap(cm);
-          setVersionMap(vm);
-        }
+        const { constMap: cm } = buildMusicExIndex(data);
+        if (!cancelled) setConstMap(cm);
       } catch {
         // ignore
       }
@@ -164,9 +160,11 @@ export function RatingSimulatorPage() {
       const techRate = resolvedConst > 0 ? calcMainRate(resolvedConst, r.technicalHighScore) + calcRankBonus(r.technicalHighScore) + calcLampBonus(lamp) : 0;
       const platRate = resolvedConst > 0 ? calcPlatinumRate(resolvedConst, r.platinumStar) : 0;
       const stableRowID = r.music_ex_id?.trim() ? `${r.music_ex_id}:${r.difficulty}` : `${r.name}-${r.difficulty}-${i}`;
-      return { ...r, rowId: stableRowID, resolvedConst, resolvedVersion: (r.version && r.version.trim()) || versionMap.get(key) || "", lampForRating: lamp, techRate, platRate, inferredFullCombo };
+      // score-row version only — do not fill from catalog (otoge-db tags Act.2 as "Re:Fresh").
+      const resolvedVersion = (r.version && r.version.trim()) || "";
+      return { ...r, rowId: stableRowID, resolvedConst, resolvedVersion, lampForRating: lamp, techRate, platRate, inferredFullCombo };
     });
-  }, [payload, constMap, versionMap, catalogByID]);
+  }, [payload, constMap, catalogByID]);
 
   const scenarioEntries = useMemo(
     () =>

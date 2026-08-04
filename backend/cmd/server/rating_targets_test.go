@@ -9,6 +9,9 @@ import (
 // payload.music_catalog 에도 없다. 서버가 mergedBody (overrides.json) 에서
 // title 로 매칭해 정수를 채워야 한다. 그리고 isNewCategorySong == true 로
 // 신곡 pool 에 잡혀야 한다.
+//
+// 회귀: catalog 에 version="Re:Fresh" 가 있어도 score version "" 을 덮어쓰면
+// 안 된다 (otoge-db 는 Act.2 신곡도 당분간 Re:Fresh 로 태깅함).
 func TestExtractRatedRows_NewSongFromServerCatalogByTitle(t *testing.T) {
 	payload := map[string]any{
 		"scores": []any{
@@ -31,6 +34,7 @@ func TestExtractRatedRows_NewSongFromServerCatalogByTitle(t *testing.T) {
 			normalizeTitle("熱異常"): {
 				"id":        "900004",
 				"title":     "熱異常",
+				"version":   "Re:Fresh", // upstream 태깅 — score version 을 오염시키면 안 됨
 				"lev_mas_i": "14.6",
 			},
 		},
@@ -46,8 +50,50 @@ func TestExtractRatedRows_NewSongFromServerCatalogByTitle(t *testing.T) {
 	if rr.TechRate <= 0 {
 		t.Errorf("TechRate = %f, want > 0 (const should be resolved via server catalog title match)", rr.TechRate)
 	}
+	if rr.ResolvedVersion != "" {
+		t.Errorf("ResolvedVersion = %q, want \"\" (must not fill from catalog)", rr.ResolvedVersion)
+	}
 	if !isNewCategorySong(rr) {
 		t.Errorf("isNewCategorySong = false, want true (resolvedVersion=%q)", rr.ResolvedVersion)
+	}
+}
+
+// 회귀: score version "" + catalog/payload music_catalog version "Re:Fresh"
+// → 여전히 신곡. const 는 catalog 에서 채워도 됨.
+func TestExtractRatedRows_EmptyScoreVersionIgnoresCatalogReFresh(t *testing.T) {
+	payload := map[string]any{
+		"scores": []any{
+			map[string]any{
+				"name":               "Act2新曲",
+				"difficulty":         "MASTER",
+				"level":              "14",
+				"technicalHighScore": 1007500,
+				"version":            "",
+				"music_ex_id":        float64(900100),
+			},
+		},
+		"music_catalog": []any{
+			map[string]any{
+				"id":        float64(900100),
+				"title":     "Act2新曲",
+				"version":   "Re:Fresh",
+				"lev_mas_i": "14.7",
+			},
+		},
+	}
+	rows := extractRatedRowsFromPayload(payload, nil)
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1", len(rows))
+	}
+	rr := rows[0]
+	if rr.ResolvedVersion != "" {
+		t.Errorf("ResolvedVersion = %q, want \"\"", rr.ResolvedVersion)
+	}
+	if !isNewCategorySong(rr) {
+		t.Errorf("isNewCategorySong = false, want true (Act.2 empty score version)")
+	}
+	if rr.TechRate <= 0 {
+		t.Errorf("TechRate = %f, want > 0 (const from catalog still OK)", rr.TechRate)
 	}
 }
 

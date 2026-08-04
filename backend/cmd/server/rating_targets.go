@@ -228,18 +228,16 @@ func calcPlatinumRate(constVal float64, star int) float64 {
 
 // isNewCategorySong: 게임의 "신곡 카테고리" (최신 확장 신곡 풀) 여부.
 //
-// SEGA 공식 music.json 은 새 확장 신곡의 `version` 필드를 한동안 비운다
-// (다음 서버 업데이트 때 이전 확장 이름 — 예: "Re:Fresh" — 을 채워 넣음).
-// 게임 내 "신곡 카테고리" 판정도 이 시점과 맞물려 동작하므로, 여기서는
-// resolved version 이 비어있는 곡을 신곡으로 본다. 프론트
-// `isNewCategorySong` (ratingCalc.ts) 과 시맨틱을 맞춰야 한다.
+// SEGA bookmarklet score payload 는 최신 확장 신곡(예: Re:Fresh Act.2)의
+// `version` 을 한동안 비운다. 이전 확장 곡은 이미 비어 있지 않은 값
+// (예: "Re:Fresh") 을 가진다. 게임 내 "신곡 카테고리" 판정도 이 시점과
+// 맞물리므로, score-row 의 version 이 비어있으면 신곡으로 본다.
 //
-// 신곡의 resolvedVersion 이 비어있는 이유는 두 가지가 모두 성립할 때:
-//   1) payload score 의 version 값이 "" (SEGA 미태깅)
-//   2) 서버 catalog fallback 도 version 값을 채우지 못함
-//      (신곡 catalog entry 를 아직 overrides 에 안 넣었거나 version 필드 없음)
-// 즉 overrides 에서 신곡 entry 에 `"version": "Re:Fresh"` 를 명시적으로
-// 넣으면 그 순간부터 구곡 pool 로 옮겨간다.
+// 중요: music-ex / otoge-db catalog 의 version 으로 빈 score version 을
+// 채우면 안 된다. upstream 은 Act.2 신곡도 당분간 `version="Re:Fresh"` 로
+// 태깅해 두기 때문에, catalog fallback 을 쓰면 신곡 pool 이 0이 된다.
+// ResolvedVersion 은 score-row version 만 사용한다 (const 등은 catalog OK).
+// 프론트 `isNewCategorySong` (ratingCalc.ts) 과 시맨틱을 맞춰야 한다.
 func isNewCategorySong(rr ratedRow) bool {
 	return strings.TrimSpace(rr.ResolvedVersion) == ""
 }
@@ -418,12 +416,9 @@ func extractRatedRowsFromPayload(payload map[string]any, srv *musicExSnapshot) [
 		if constVal <= 0 {
 			continue
 		}
-		// version: payload score 우선 (SEGA 가 태깅 완료한 경우). 비어있으면
-		// 서버 catalog 의 version 필드로 fallback (overrides 로 채운 경우).
+		// version: score-row 만 사용. catalog/otoge-db 의 version 으로 빈 값을
+		// 채우면 Act.2 신곡이 "Re:Fresh" 로 오염되어 구곡 pool 로 간다.
 		resolvedVersion := strings.TrimSpace(toString(row["version"]))
-		if resolvedVersion == "" && cat != nil {
-			resolvedVersion = strings.TrimSpace(toString(cat["version"]))
-		}
 		technical := toInt(row["technicalHighScore"])
 		fullBell := toBool(row["fullBell"])
 		allBreak := toBool(row["allBreak"])

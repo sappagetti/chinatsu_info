@@ -47,7 +47,7 @@ describe("parseConst", () => {
 });
 
 describe("isNewCategorySong", () => {
-  // 신곡 = version 필드가 아직 비어있는 곡 (SEGA 가 최신 확장 신곡에 태깅 전).
+  // 신곡 = score-row version 이 아직 비어있는 곡 (SEGA 가 최신 확장 신곡에 태깅 전).
   it("treats empty version as new category (신曲枠)", () => {
     expect(isNewCategorySong("")).toBe(true);
     expect(isNewCategorySong(undefined)).toBe(true);
@@ -57,6 +57,17 @@ describe("isNewCategorySong", () => {
     expect(isNewCategorySong("Re:Fresh")).toBe(false);
     expect(isNewCategorySong("bright MEMORY Act.2")).toBe(false);
     expect(isNewCategorySong("ONGEKI")).toBe(false);
+  });
+  // 회귀: Act.2 신곡은 score.version="" 인데 otoge-db catalog 는 "Re:Fresh".
+  // resolvedVersion 은 score-row 만 써야 하며, catalog 로 채우면 구곡이 된다.
+  it("stays new when score version is empty even if catalog would say Re:Fresh", () => {
+    const scoreVersion = "";
+    const catalogVersion = "Re:Fresh";
+    const resolvedFromScoreOnly = (scoreVersion && scoreVersion.trim()) || "";
+    expect(isNewCategorySong(resolvedFromScoreOnly)).toBe(true);
+    // 잘못된 catalog fallback 경로 (과거 버그)
+    const poisoned = (scoreVersion && scoreVersion.trim()) || catalogVersion;
+    expect(isNewCategorySong(poisoned)).toBe(false);
   });
 });
 

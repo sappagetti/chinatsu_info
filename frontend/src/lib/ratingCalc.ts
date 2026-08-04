@@ -57,10 +57,14 @@ export function parseConst(v: unknown): number | undefined {
 /**
  * 게임의 "신곡 카테고리" (최신 확장의 신곡 풀) 에 속하는지 판정한다.
  *
- * SEGA 공식 music.json 은 새 확장이 나올 때 그 확장 신곡들의 `version` 필드를
- * 한동안 비운 상태로 노출한다 (다음 소규모 업데이트 시점에 이전 확장 이름 —
- * 예: "Re:Fresh" 로 채워 넣음). 게임 안의 "신곡 카테고리" 판정도 이 시점을
- * 기준으로 동작하므로, 우리 쪽에서는 `version` 이 비어있는 곡을 신곡으로 본다.
+ * SEGA bookmarklet score payload 는 최신 확장 신곡(예: Re:Fresh Act.2)의
+ * `version` 을 한동안 비운다. 이전 확장 곡은 이미 비어 있지 않은 값
+ * (예: "Re:Fresh") 을 가진다. 게임 안의 "신곡 카테고리" 판정도 이 시점을
+ * 기준으로 동작하므로, score-row `version` 이 비어있으면 신곡으로 본다.
+ *
+ * 호출 시 music-ex / otoge-db catalog 의 version 으로 빈 score version 을
+ * 채우지 말 것. upstream 은 Act.2 도 당분간 `version="Re:Fresh"` 로 태깅해
+ * 두기 때문에 catalog fallback 을 쓰면 신곡 pool 이 0이 된다.
  *
  * 백엔드 `isNewCategorySong` (rating_targets.go) 와 시맨틱을 맞출 것.
  */
