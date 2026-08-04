@@ -16,7 +16,8 @@ type MemoEntry = {
 };
 
 const MEMORY_CACHE = new Map<string, MemoEntry>();
-const STORAGE_KEY_PREFIX = "music-ex-cache:v1:";
+// v2: Re:Fresh Act.2 version rewrite 배포 후 stale localStorage 무효화.
+const STORAGE_KEY_PREFIX = "music-ex-cache:v2:";
 const DEFAULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 type StoredEntry = {
