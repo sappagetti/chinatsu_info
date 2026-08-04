@@ -61,7 +61,8 @@ describe("isNewCategorySong", () => {
   // 회귀: Act.2 신곡은 score.version="" 인데 otoge-db catalog 는 "Re:Fresh".
   // resolvedVersion 은 score-row 만 써야 하며, catalog 로 채우면 구곡이 된다.
   it("stays new when score version is empty even if catalog would say Re:Fresh", () => {
-    const scoreVersion = "";
+    // string 타입으로 둬야 "" literal narrow → never.trim 오류를 피한다.
+    const scoreVersion: string = "";
     const catalogVersion = "Re:Fresh";
     const resolvedFromScoreOnly = (scoreVersion && scoreVersion.trim()) || "";
     expect(isNewCategorySong(resolvedFromScoreOnly)).toBe(true);
