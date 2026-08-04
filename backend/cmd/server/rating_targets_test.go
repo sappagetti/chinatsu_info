@@ -53,8 +53,8 @@ func TestExtractRatedRows_NewSongFromServerCatalogByTitle(t *testing.T) {
 	if rr.ResolvedVersion != "" {
 		t.Errorf("ResolvedVersion = %q, want \"\" (must not fill from catalog)", rr.ResolvedVersion)
 	}
-	if !isNewCategorySong(rr) {
-		t.Errorf("isNewCategorySong = false, want true (resolvedVersion=%q)", rr.ResolvedVersion)
+	if !isNewCategorySong(rr.ResolvedVersion, rr.CatalogVersion, defaultMusicExOverrideMeta().NewSongVersions) {
+		t.Errorf("isNewCategorySong = false, want true (resolvedVersion=%q catalog=%q)", rr.ResolvedVersion, rr.CatalogVersion)
 	}
 }
 
@@ -89,7 +89,7 @@ func TestExtractRatedRows_EmptyScoreVersionIgnoresCatalogReFresh(t *testing.T) {
 	if rr.ResolvedVersion != "" {
 		t.Errorf("ResolvedVersion = %q, want \"\"", rr.ResolvedVersion)
 	}
-	if !isNewCategorySong(rr) {
+	if !isNewCategorySong(rr.ResolvedVersion, rr.CatalogVersion, defaultMusicExOverrideMeta().NewSongVersions) {
 		t.Errorf("isNewCategorySong = false, want true (Act.2 empty score version)")
 	}
 	if rr.TechRate <= 0 {
@@ -146,8 +146,8 @@ func TestExtractRatedRows_PayloadCatalogTakesPrecedenceOverServer(t *testing.T) 
 	if rr.TechRate <= 0 {
 		t.Errorf("TechRate = %f, want > 0 (from payload catalog 14.0)", rr.TechRate)
 	}
-	// 여기서는 version 있으니 old pool.
-	if isNewCategorySong(rr) {
+	// score=Re:Fresh, catalog=Re:Fresh → old (Act.1 era)
+	if isNewCategorySong(rr.ResolvedVersion, rr.CatalogVersion, defaultMusicExOverrideMeta().NewSongVersions) {
 		t.Errorf("isNewCategorySong = true, want false (version=Re:Fresh)")
 	}
 }
@@ -344,22 +344,78 @@ func TestIsBonusCatalogEntry(t *testing.T) {
 	}
 }
 
-// isNewCategorySong 단위 테스트: version 이 비어야 신곡.
+// isNewCategorySong: 빈 score version, Act.2 라벨, catalog 재태깅 복구.
 func TestIsNewCategorySong(t *testing.T) {
+	news := []string{"Re:Fresh Act.2"}
 	cases := []struct {
-		ver  string
-		want bool
+		score string
+		cat   string
+		want  bool
 	}{
-		{"", true},
-		{"   ", true},
-		{"Re:Fresh", false},
-		{"bright MEMORY Act.2", false},
-		{"ONGEKI", false},
+		{"", "", true},
+		{"   ", "", true},
+		{"Re:Fresh", "Re:Fresh", false},
+		{"Re:Fresh Act.2", "Re:Fresh Act.2", true},
+		// 북마크릿이 otoge-db Re:Fresh 를 찍었어도 서버 catalog 가 Act.2 면 신곡
+		{"Re:Fresh", "Re:Fresh Act.2", true},
+		{"bright MEMORY Act.2", "bright MEMORY Act.2", false},
+		{"ONGEKI", "", false},
 	}
 	for _, c := range cases {
-		got := isNewCategorySong(ratedRow{ResolvedVersion: c.ver})
+		got := isNewCategorySong(c.score, c.cat, news)
 		if got != c.want {
-			t.Errorf("isNewCategorySong(%q) = %v, want %v", c.ver, got, c.want)
+			t.Errorf("isNewCategorySong(%q, %q) = %v, want %v", c.score, c.cat, got, c.want)
 		}
+	}
+}
+
+// 북마크릿이 score.version="Re:Fresh" 로 찍은 Act.2 곡도
+// 서버 catalog 의 Act.2 재태깅으로 신곡 pool 에 들어가야 한다.
+// payload.music_catalog 가 옛 라벨("Re:Fresh") 이어도 서버 snapshot 을 우선.
+func TestExtractRatedRows_CatalogAct2RecoversPoisonedScoreVersion(t *testing.T) {
+	payload := map[string]any{
+		"scores": []any{
+			map[string]any{
+				"name":               "熱異常",
+				"difficulty":         "MASTER",
+				"level":              "14",
+				"technicalHighScore": 1005000,
+				"version":            "Re:Fresh", // bookmarklet + otoge-db
+				"music_ex_id":        float64(200008),
+			},
+		},
+		"music_catalog": []any{
+			map[string]any{
+				"id":        float64(200008),
+				"title":     "熱異常",
+				"version":   "Re:Fresh", // stale payload catalog
+				"lev_mas_i": "14.6",
+			},
+		},
+	}
+	srv := &musicExSnapshot{
+		ByID: map[int]map[string]any{
+			200008: {
+				"id":        "200008",
+				"title":     "熱異常",
+				"version":   "Re:Fresh Act.2", // server rewrite
+				"lev_mas_i": "14.6",
+			},
+		},
+		ByTitle: map[string]map[string]any{},
+	}
+	rows := extractRatedRowsFromPayload(payload, srv)
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1", len(rows))
+	}
+	rr := rows[0]
+	if rr.ResolvedVersion != "Re:Fresh" {
+		t.Errorf("ResolvedVersion = %q, want Re:Fresh (score preserved)", rr.ResolvedVersion)
+	}
+	if rr.CatalogVersion != "Re:Fresh Act.2" {
+		t.Errorf("CatalogVersion = %q, want Re:Fresh Act.2 (server preferred over payload)", rr.CatalogVersion)
+	}
+	if !isNewCategorySong(rr.ResolvedVersion, rr.CatalogVersion, defaultMusicExOverrideMeta().NewSongVersions) {
+		t.Errorf("want new-song via catalog Act.2 rewrite")
 	}
 }

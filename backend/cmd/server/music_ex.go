@@ -66,6 +66,10 @@ type musicExCache struct {
 	snapshotByID    map[int]map[string]any
 	snapshotByTitle map[string]map[string]any
 
+	// 신곡 판별용 version 라벨 목록 (예: ["Re:Fresh Act.2"]).
+	// override _meta 또는 코드 기본값. /api/v1/config 으로도 노출.
+	newSongVersions []string
+
 	sourceURL string
 	cachePath string
 	http      *http.Client
@@ -79,11 +83,13 @@ type musicExSnapshot struct {
 }
 
 func newMusicExCache() *musicExCache {
+	meta := defaultMusicExOverrideMeta()
 	return &musicExCache{
-		sourceURL:     mustEnv("MUSIC_EX_SOURCE_URL", musicExDefaultSource),
-		cachePath:     mustEnv("MUSIC_EX_CACHE_PATH", musicExDefaultCachePath),
-		overridesPath: mustEnv("MUSIC_EX_OVERRIDES_PATH", musicExDefaultOverridesPath),
-		http:          &http.Client{Timeout: musicExHTTPTimeout},
+		sourceURL:       mustEnv("MUSIC_EX_SOURCE_URL", musicExDefaultSource),
+		cachePath:       mustEnv("MUSIC_EX_CACHE_PATH", musicExDefaultCachePath),
+		overridesPath:   mustEnv("MUSIC_EX_OVERRIDES_PATH", musicExDefaultOverridesPath),
+		newSongVersions: append([]string(nil), meta.NewSongVersions...),
+		http:            &http.Client{Timeout: musicExHTTPTimeout},
 	}
 }
 
@@ -267,22 +273,47 @@ func (c *musicExCache) applyOverrides() error {
 		mtime = info.ModTime()
 	}
 
-	overrides, err := loadMusicExOverridesFile(c.overridesPath)
+	overrides, meta, err := loadMusicExOverridesFile(c.overridesPath)
 	if err != nil {
 		// 파싱 실패 — raw 그대로 서빙되도록 mergedBody 를 raw 로 맞춰둔다.
 		c.setMergedBody(raw, mtime)
+		c.setNewSongVersions(defaultMusicExOverrideMeta().NewSongVersions)
 		return err
 	}
 	merged, applied, err := applyMusicExOverrides(raw, overrides)
 	if err != nil {
 		c.setMergedBody(raw, mtime)
+		c.setNewSongVersions(meta.NewSongVersions)
+		return err
+	}
+	merged, splitN, err := applyVersionSplitsToBody(merged, meta.VersionSplits)
+	if err != nil {
+		c.setMergedBody(raw, mtime)
+		c.setNewSongVersions(meta.NewSongVersions)
 		return err
 	}
 	c.setMergedBody(merged, mtime)
+	c.setNewSongVersions(meta.NewSongVersions)
 	if applied > 0 {
 		log.Printf("music-ex: applied %d override field group(s) from %s", applied, c.overridesPath)
 	}
+	if splitN > 0 {
+		log.Printf("music-ex: rewrote version on %d track(s) via version_splits", splitN)
+	}
 	return nil
+}
+
+func (c *musicExCache) setNewSongVersions(versions []string) {
+	c.mu.Lock()
+	c.newSongVersions = append([]string(nil), versions...)
+	c.mu.Unlock()
+}
+
+// NewSongVersions: 신곡 카테고리로 취급할 version 라벨 목록의 복사본.
+func (c *musicExCache) NewSongVersions() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]string(nil), c.newSongVersions...)
 }
 
 func (c *musicExCache) setMergedBody(merged []byte, mtime time.Time) {
@@ -373,6 +404,15 @@ func (c *musicExCache) serveHTTP() http.HandlerFunc {
 			return
 		}
 		_, _ = w.Write(body)
+	}
+}
+
+// handleAppConfig: GET /api/v1/config — 프론트 신곡 판별 등에 쓰는 가벼운 설정.
+func handleAppConfig(mc *musicExCache) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"new_song_versions": mc.NewSongVersions(),
+		})
 	}
 }
 

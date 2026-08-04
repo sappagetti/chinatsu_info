@@ -29,6 +29,7 @@ type ratedRow struct {
 	TechRate           float64 `json:"tech_rate"`
 	PlatRate           float64 `json:"plat_rate"`
 	ResolvedVersion    string  `json:"-"`
+	CatalogVersion     string  `json:"-"`
 }
 
 func handleRatingTargets(st *store.Store, mc *musicExCache) http.HandlerFunc {
@@ -57,12 +58,13 @@ func handleRatingTargets(st *store.Store, mc *musicExCache) http.HandlerFunc {
 		// 보조 소스로 쓴다. 신곡은 payload 안 catalog 에 mxid 가 없이 오므로
 		// (bookmarklet 소스에도 아직 없음) 서버 catalog 를 title 로 매칭해야
 		// 정수 (`lev_*_i`) 를 얻을 수 있다.
+		news := mc.NewSongVersions()
 		rows := extractRatedRowsFromPayload(snap.Payload, mc.Snapshot())
 		newPool := make([]ratedRow, 0, len(rows))
 		oldPool := make([]ratedRow, 0, len(rows))
 		platPool := make([]ratedRow, 0, len(rows))
 		for _, rr := range rows {
-			if isNewCategorySong(rr) {
+			if isNewCategorySong(rr.ResolvedVersion, rr.CatalogVersion, news) {
 				newPool = append(newPool, rr)
 			} else {
 				oldPool = append(oldPool, rr)
@@ -226,20 +228,36 @@ func calcPlatinumRate(constVal float64, star int) float64 {
 	return math.Floor(raw*1000) / 1000
 }
 
-// isNewCategorySong: 게임의 "신곡 카테고리" (최신 확장 신곡 풀) 여부.
+// isNewCategorySong: 게임의 "신곡 카테고리" (최신 Act 신곡 풀) 여부.
 //
-// SEGA bookmarklet score payload 는 최신 확장 신곡(예: Re:Fresh Act.2)의
-// `version` 을 한동안 비운다. 이전 확장 곡은 이미 비어 있지 않은 값
-// (예: "Re:Fresh") 을 가진다. 게임 내 "신곡 카테고리" 판정도 이 시점과
-// 맞물리므로, score-row 의 version 이 비어있으면 신곡으로 본다.
+// 판정:
+//  1) score-row version 이 비어있으면 신곡 (SEGA 미태깅 공백 기간)
+//  2) score-row version 이 newSongVersions 에 있으면 신곡
+//  3) 서버 catalog version 이 newSongVersions 에 있으면 신곡
+//     (북마크릿이 otoge-db 의 "Re:Fresh" 를 score 에 찍었어도,
+//      서버가 date_added 로 "Re:Fresh Act.2" 로 재태깅한 catalog 로 복구)
 //
-// 중요: music-ex / otoge-db catalog 의 version 으로 빈 score version 을
-// 채우면 안 된다. upstream 은 Act.2 신곡도 당분간 `version="Re:Fresh"` 로
-// 태깅해 두기 때문에, catalog fallback 을 쓰면 신곡 pool 이 0이 된다.
-// ResolvedVersion 은 score-row version 만 사용한다 (const 등은 catalog OK).
 // 프론트 `isNewCategorySong` (ratingCalc.ts) 과 시맨틱을 맞춰야 한다.
-func isNewCategorySong(rr ratedRow) bool {
-	return strings.TrimSpace(rr.ResolvedVersion) == ""
+func isNewCategorySong(scoreVersion, catalogVersion string, newSongVersions []string) bool {
+	sv := strings.TrimSpace(scoreVersion)
+	if sv == "" {
+		return true
+	}
+	for _, v := range newSongVersions {
+		if sv == v {
+			return true
+		}
+	}
+	cv := strings.TrimSpace(catalogVersion)
+	if cv == "" {
+		return false
+	}
+	for _, v := range newSongVersions {
+		if cv == v {
+			return true
+		}
+	}
+	return false
 }
 
 // isBonusCatalogEntry: 게임 내 "보너스 트랙" 카테고리 곡 (레이팅 계산 제외 대상) 인지.
@@ -399,8 +417,6 @@ func extractRatedRowsFromPayload(payload map[string]any, srv *musicExSnapshot) [
 		}
 		level := toString(row["level"])
 		cat := lookupCatalog(name, musicExID, catalogByID, srv)
-		// 서버 catalog fallback 을 통해 새로 붙은 entry 나 payload 안에 없던
-		// 곡이 bonus="1" 로 태깅되어 있으면 여기서도 제외.
 		if cat != nil && isBonusCatalogEntry(cat) {
 			continue
 		}
@@ -416,9 +432,27 @@ func extractRatedRowsFromPayload(payload map[string]any, srv *musicExSnapshot) [
 		if constVal <= 0 {
 			continue
 		}
-		// version: score-row 만 사용. catalog/otoge-db 의 version 으로 빈 값을
-		// 채우면 Act.2 신곡이 "Re:Fresh" 로 오염되어 구곡 pool 로 간다.
+		// score-row version 은 그대로 보존 (북마크릿이 music-ex 에서 복사한 값).
+		// 신곡 판별용 catalog version 은 서버 mergedBody(Act.2 재태깅) 를 우선.
+		// payload.music_catalog 는 북마크릿 시점 otoge-db 라벨("Re:Fresh")을
+		// 그대로 들고 있을 수 있다.
 		resolvedVersion := strings.TrimSpace(toString(row["version"]))
+		catalogVersion := ""
+		if srv != nil {
+			if sc, ok := srv.ByID[musicExID]; ok && musicExID > 0 {
+				catalogVersion = strings.TrimSpace(toString(sc["version"]))
+			}
+			if catalogVersion == "" {
+				if key := normalizeTitle(name); key != "" {
+					if sc, ok := srv.ByTitle[key]; ok {
+						catalogVersion = strings.TrimSpace(toString(sc["version"]))
+					}
+				}
+			}
+		}
+		if catalogVersion == "" && cat != nil {
+			catalogVersion = strings.TrimSpace(toString(cat["version"]))
+		}
 		technical := toInt(row["technicalHighScore"])
 		fullBell := toBool(row["fullBell"])
 		allBreak := toBool(row["allBreak"])
@@ -438,6 +472,7 @@ func extractRatedRowsFromPayload(payload map[string]any, srv *musicExSnapshot) [
 			TechRate:           techRate,
 			PlatRate:           calcPlatinumRate(constVal, platStar),
 			ResolvedVersion:    resolvedVersion,
+			CatalogVersion:     catalogVersion,
 		})
 	}
 	return out

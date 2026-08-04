@@ -47,28 +47,25 @@ describe("parseConst", () => {
 });
 
 describe("isNewCategorySong", () => {
-  // 신곡 = score-row version 이 아직 비어있는 곡 (SEGA 가 최신 확장 신곡에 태깅 전).
   it("treats empty version as new category (신曲枠)", () => {
     expect(isNewCategorySong("")).toBe(true);
     expect(isNewCategorySong(undefined)).toBe(true);
     expect(isNewCategorySong("   ")).toBe(true);
   });
-  it("treats any non-empty version string as old category", () => {
+  it("treats Re:Fresh Act.2 as new and plain Re:Fresh as old", () => {
+    expect(isNewCategorySong("Re:Fresh Act.2")).toBe(true);
     expect(isNewCategorySong("Re:Fresh")).toBe(false);
     expect(isNewCategorySong("bright MEMORY Act.2")).toBe(false);
     expect(isNewCategorySong("ONGEKI")).toBe(false);
   });
-  // 회귀: Act.2 신곡은 score.version="" 인데 otoge-db catalog 는 "Re:Fresh".
-  // resolvedVersion 은 score-row 만 써야 하며, catalog 로 채우면 구곡이 된다.
-  it("stays new when score version is empty even if catalog would say Re:Fresh", () => {
-    // string 타입으로 둬야 "" literal narrow → never.trim 오류를 피한다.
-    const scoreVersion: string = "";
-    const catalogVersion = "Re:Fresh";
-    const resolvedFromScoreOnly = (scoreVersion && scoreVersion.trim()) || "";
-    expect(isNewCategorySong(resolvedFromScoreOnly)).toBe(true);
-    // 잘못된 catalog fallback 경로 (과거 버그)
-    const poisoned = (scoreVersion && scoreVersion.trim()) || catalogVersion;
-    expect(isNewCategorySong(poisoned)).toBe(false);
+  // 회귀: 북마크릿이 score.version="Re:Fresh" 로 찍어도 catalog Act.2 면 신곡
+  it("recovers Act.2 via catalog version when score was stamped Re:Fresh", () => {
+    expect(
+      isNewCategorySong("Re:Fresh", { catalogVersion: "Re:Fresh Act.2" }),
+    ).toBe(true);
+    expect(
+      isNewCategorySong("Re:Fresh", { catalogVersion: "Re:Fresh" }),
+    ).toBe(false);
   });
 });
 

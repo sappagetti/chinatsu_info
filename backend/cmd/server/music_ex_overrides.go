@@ -16,29 +16,33 @@
 //         image_url / version 등). upstream 이 나중에 같은 title 로
 //         곡을 넣으면 id 매칭이 실패해도 title 매칭이 성공하므로 중복
 //         append 되지 않고 update 모드로 전환된다.
+//       version split — otoge-db 가 Act 를 세분화하기 전에도
+//         date_added 기준으로 "Re:Fresh" → "Re:Fresh Act.2" 처럼 재태깅.
+//         악곡 필터·북마크릿 version·신곡 판별이 같은 라벨을 공유한다.
 //
-// 파일 형식 (예):
+// 파일 형식:
 //
+//	레거시 (배열만):
 //	[
-//	  // 기존 곡 정수만 채우기 (fill-only)
-//	  { "title": "ココリエール", "lev_mas_i": "13.0" },
-//	  { "title": "星綴りのアルケミスト", "lev_exc_i": "12.4", "lev_mas_i": "14.6" },
-//	  { "id": "1234", "lev_mas_i": "14.7", "force": true },
-//
-//	  // 신곡 통째로 추가 (매칭 실패시 자동 add)
-//	  {
-//	    "id": "900001", "title": "熱異常",
-//	    "version": "Re:Fresh",
-//	    "lev_mas": "14", "lev_mas_i": "14.6",
-//	    "lev_exc": "12", "lev_exc_i": "12.0"
-//	  }
+//	  { "title": "ココリエール", "lev_mas_i": "13.0" }
 //	]
 //
+//	권장 (object + _meta):
+//	{
+//	  "_meta": {
+//	    "new_song_versions": ["Re:Fresh Act.2"],
+//	    "version_splits": [
+//	      { "from": "Re:Fresh", "to": "Re:Fresh Act.2", "since": "20260723" }
+//	    ]
+//	  },
+//	  "songs": [ { "title": "...", "lev_mas_i": "14.6", "force": true } ]
+//	}
+//
 // 매칭 우선순위: id > title+artist > title (실패 시 신곡으로 append).
-// 알 수 없는 곡 (title 없음) 이거나 빈 fields 는 조용히 스킵한다.
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,8 +52,6 @@ import (
 )
 
 // musicExOverrideUpdateFields: 기존 곡을 update 할 때 반영 허용 필드.
-// 좁게 (정수만) 유지해 실수로 title/artist/level 을 뒤엎는 사고를 막는다.
-// 신곡 add 모드에서는 이 화이트리스트를 무시하고 override 의 모든 필드를 그대로 쓴다.
 var musicExOverrideUpdateFields = map[string]struct{}{
 	"lev_bas_i": {},
 	"lev_adv_i": {},
@@ -58,41 +60,137 @@ var musicExOverrideUpdateFields = map[string]struct{}{
 	"lev_lnt_i": {},
 }
 
+// Re:Fresh Act.2 시작일 (YYYYMMDD). otoge-db 가 Act 문자열을 쪼개기 전까지
+// date_added >= 이 값인 "Re:Fresh" 곡을 "Re:Fresh Act.2" 로 재태깅한다.
+// Act 전환 시(~1.5–2년) defaultMusicExOverrideMeta 만 갱신하면 된다.
+const defaultAct2SinceDate = "20260723"
+const defaultAct2Version = "Re:Fresh Act.2"
+const defaultAct2FromVersion = "Re:Fresh"
+
+type musicExVersionSplit struct {
+	From  string // 예: "Re:Fresh"
+	To    string // 예: "Re:Fresh Act.2"
+	Since string // YYYYMMDD inclusive
+}
+
+type musicExOverrideMeta struct {
+	NewSongVersions []string
+	VersionSplits   []musicExVersionSplit
+}
+
 type musicExOverrideEntry struct {
 	id     string
 	title  string
 	artist string
 	force  bool
-	// fields: override 에 적힌 모든 (알려진 top-level 4개 제외) 필드.
-	// 값은 문자열로 통일. 신곡 add 모드에서 그대로 반영되고, 기존 곡 update
-	// 모드에서는 musicExOverrideUpdateFields 화이트리스트로 필터된다.
 	fields map[string]string
 }
 
-// loadMusicExOverridesFile: 디스크에서 오버라이드 파일을 읽어 파싱한다.
-// 파일이 없거나 비어있으면 (nil, nil). 깨진 JSON 등 진짜 에러일 때만 err 리턴.
-func loadMusicExOverridesFile(path string) ([]musicExOverrideEntry, error) {
+func defaultMusicExOverrideMeta() musicExOverrideMeta {
+	return musicExOverrideMeta{
+		NewSongVersions: []string{defaultAct2Version},
+		VersionSplits: []musicExVersionSplit{
+			{From: defaultAct2FromVersion, To: defaultAct2Version, Since: defaultAct2SinceDate},
+		},
+	}
+}
+
+// loadMusicExOverridesFile: 오버라이드 파일 + meta 를 읽는다.
+// 파일이 없어도 default meta 는 반환한다 (version split / 신곡 버전 기본값).
+func loadMusicExOverridesFile(path string) ([]musicExOverrideEntry, musicExOverrideMeta, error) {
+	meta := defaultMusicExOverrideMeta()
 	if strings.TrimSpace(path) == "" {
-		return nil, nil
+		return nil, meta, nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+			return nil, meta, nil
 		}
-		return nil, err
+		return nil, meta, err
 	}
 	if len(strings.TrimSpace(string(b))) == 0 {
-		return nil, nil
+		return nil, meta, nil
 	}
-	return parseMusicExOverrides(b)
+	return parseMusicExOverridesBundle(b)
 }
 
+// parseMusicExOverrides: 레거시 배열 전용 파서 (테스트 호환).
 func parseMusicExOverrides(b []byte) ([]musicExOverrideEntry, error) {
+	songs, _, err := parseMusicExOverridesBundle(b)
+	return songs, err
+}
+
+func parseMusicExOverridesBundle(b []byte) ([]musicExOverrideEntry, musicExOverrideMeta, error) {
+	meta := defaultMusicExOverrideMeta()
+	trimmed := bytes.TrimSpace(b)
+	if len(trimmed) == 0 {
+		return nil, meta, nil
+	}
+
+	if trimmed[0] == '{' {
+		var obj struct {
+			Meta *struct {
+				NewSongVersions []string `json:"new_song_versions"`
+				VersionSplits   []struct {
+					From  string `json:"from"`
+					To    string `json:"to"`
+					Since string `json:"since"`
+				} `json:"version_splits"`
+			} `json:"_meta"`
+			Songs []map[string]any `json:"songs"`
+		}
+		if err := json.Unmarshal(b, &obj); err != nil {
+			return nil, meta, fmt.Errorf("parse overrides: %w", err)
+		}
+		if obj.Meta != nil {
+			if obj.Meta.NewSongVersions != nil {
+				meta.NewSongVersions = normalizeStringList(obj.Meta.NewSongVersions)
+			}
+			if obj.Meta.VersionSplits != nil {
+				splits := make([]musicExVersionSplit, 0, len(obj.Meta.VersionSplits))
+				for _, s := range obj.Meta.VersionSplits {
+					from := strings.TrimSpace(s.From)
+					to := strings.TrimSpace(s.To)
+					since := strings.TrimSpace(s.Since)
+					if from == "" || to == "" || since == "" {
+						continue
+					}
+					splits = append(splits, musicExVersionSplit{From: from, To: to, Since: since})
+				}
+				meta.VersionSplits = splits
+			}
+		}
+		songs, err := parseOverrideEntryMaps(obj.Songs)
+		return songs, meta, err
+	}
+
 	var raw []map[string]any
 	if err := json.Unmarshal(b, &raw); err != nil {
-		return nil, fmt.Errorf("parse overrides: %w", err)
+		return nil, meta, fmt.Errorf("parse overrides: %w", err)
 	}
+	songs, err := parseOverrideEntryMaps(raw)
+	return songs, meta, err
+}
+
+func normalizeStringList(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]struct{}{}
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+func parseOverrideEntryMaps(raw []map[string]any) ([]musicExOverrideEntry, error) {
 	out := make([]musicExOverrideEntry, 0, len(raw))
 	for _, e := range raw {
 		entry := musicExOverrideEntry{fields: map[string]string{}}
@@ -109,8 +207,6 @@ func parseMusicExOverrides(b []byte) ([]musicExOverrideEntry, error) {
 					entry.force = bv
 				}
 			default:
-				// 여기서는 화이트리스트로 거르지 않는다. add 모드용으로 모두 담아두고
-				// apply 시 매칭 결과에 따라 update 화이트리스트를 적용한다.
 				s := strings.TrimSpace(musicExOverrideValueString(v))
 				if s == "" {
 					continue
@@ -118,7 +214,6 @@ func parseMusicExOverrides(b []byte) ([]musicExOverrideEntry, error) {
 				entry.fields[k] = s
 			}
 		}
-		// id 도 title 도 없으면 어디 붙일지 알 수 없다.
 		if entry.id == "" && entry.title == "" {
 			continue
 		}
@@ -130,11 +225,7 @@ func parseMusicExOverrides(b []byte) ([]musicExOverrideEntry, error) {
 	return out, nil
 }
 
-// applyMusicExOverrides: rawBody (music-ex.json 원본 바이트) 위에 overrides 를
-// 머지한 결과 바이트를 만든다. 매칭 0 건이거나 적용 0 건이면 rawBody 를 그대로
-// 돌려준다 (불필요한 재마샬 회피).
-//
-// applied 는 실제로 1 개 이상 필드가 갱신된 곡 수.
+// applyMusicExOverrides: rawBody 위에 song overrides 를 머지한다.
 func applyMusicExOverrides(rawBody []byte, overrides []musicExOverrideEntry) (merged []byte, applied int, err error) {
 	if len(overrides) == 0 {
 		return rawBody, 0, nil
@@ -170,8 +261,6 @@ func applyMusicExOverrides(rawBody []byte, overrides []musicExOverrideEntry) (me
 		matches := lookupOverrideMatches(o, byID, byTitleArtist, byTitle)
 
 		if len(matches) == 0 {
-			// 자동 add: title 이 있어야만 안전하게 신곡 entry 를 만든다.
-			// id 만 있고 title 없는 override 는 어디로 붙일지 모호하므로 스킵.
 			if o.title == "" {
 				continue
 			}
@@ -183,18 +272,15 @@ func applyMusicExOverrides(rawBody []byte, overrides []musicExOverrideEntry) (me
 			if o.artist != "" {
 				row["artist"] = o.artist
 			}
-			// add 모드에서는 화이트리스트 없이 모두 반영.
 			for k, v := range o.fields {
 				row[k] = v
 			}
 			arr = append(arr, row)
-			// 다음 override 가 같은 title 로 들어오면 update 로 잡히도록 index 갱신.
 			indexRow(len(arr) - 1)
 			applied++
 			continue
 		}
 
-		// 매칭 성공 → 기존 곡 update. 화이트리스트(정수만) 통과 필드만 갱신.
 		for _, idx := range matches {
 			row := arr[idx]
 			rowChanged := false
@@ -224,15 +310,40 @@ func applyMusicExOverrides(rawBody []byte, overrides []musicExOverrideEntry) (me
 	return out, applied, nil
 }
 
-// lookupOverrideMatches: 하나의 override entry 에 매칭되는 arr 인덱스 목록을
-// id > title+artist > title 순으로 찾는다.
-//
-// 특히 id 매칭이 실패한 경우, override 에 title 이 함께 있으면 title 매칭도
-// 시도한다. 이유:
-//   - 신곡 add 로 우리가 임의 id (예: 900001) 를 부여한 override entry 는
-//     upstream 이 나중에 실제 id 로 곡을 넣더라도 id 매칭이 계속 실패한다.
-//   - 그때 title 로 upstream row 를 잡을 수 있어야 catalog 에 중복 append 되지 않고
-//     update 모드로 흡수된다.
+// applyVersionSplitsToBody: date_added 기준으로 version 라벨을 재태깅한다.
+// 변경이 없으면 rawBody 를 그대로 반환한다.
+func applyVersionSplitsToBody(rawBody []byte, splits []musicExVersionSplit) (merged []byte, changed int, err error) {
+	if len(splits) == 0 || len(rawBody) == 0 {
+		return rawBody, 0, nil
+	}
+	var arr []map[string]any
+	if err := json.Unmarshal(rawBody, &arr); err != nil {
+		return nil, 0, fmt.Errorf("parse music-ex for version split: %w", err)
+	}
+	for _, row := range arr {
+		ver := strings.TrimSpace(musicExOverrideValueString(row["version"]))
+		date := strings.TrimSpace(musicExOverrideValueString(row["date_added"]))
+		if ver == "" || date == "" {
+			continue
+		}
+		for _, sp := range splits {
+			if ver == sp.From && date >= sp.Since {
+				row["version"] = sp.To
+				changed++
+				break
+			}
+		}
+	}
+	if changed == 0 {
+		return rawBody, 0, nil
+	}
+	out, err := json.Marshal(arr)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshal version-split music-ex: %w", err)
+	}
+	return out, changed, nil
+}
+
 func lookupOverrideMatches(o musicExOverrideEntry, byID, byTitleArtist, byTitle map[string][]int) []int {
 	if o.id != "" {
 		if m := byID[o.id]; len(m) > 0 {
@@ -261,9 +372,6 @@ func lookupOverrideMatches(o musicExOverrideEntry, byID, byTitleArtist, byTitle 
 	return nil
 }
 
-// musicExOverrideValueString: JSON unmarshal 결과(any) 를 문자열로 정규화한다.
-// music-ex.json 은 보면정수를 문자열("13.0") 로 두지만, 사용자가 오버라이드를
-// 숫자(13.0) 로 적어도 받아주기 위함.
 func musicExOverrideValueString(v any) string {
 	switch t := v.(type) {
 	case nil:
@@ -276,7 +384,6 @@ func musicExOverrideValueString(v any) string {
 		}
 		return "false"
 	case float64:
-		// 정수 값이면 정수 표기로 (id 같은 케이스).
 		if t == float64(int64(t)) {
 			return strconv.FormatInt(int64(t), 10)
 		}

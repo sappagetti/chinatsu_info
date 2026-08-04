@@ -339,3 +339,54 @@ func TestParseOverrides_BadJSONReturnsError(t *testing.T) {
 		t.Errorf("err = %v, want wrapped 'parse overrides'", err)
 	}
 }
+
+func TestApplyVersionSplits_RewritesAct2ByDate(t *testing.T) {
+	raw := []byte(`[
+		{"id":"1","title":"旧ReFresh","version":"Re:Fresh","date_added":"20250401","lev_mas_i":"14.0"},
+		{"id":"2","title":"熱異常","version":"Re:Fresh","date_added":"20260723","lev_mas_i":"14.6"},
+		{"id":"3","title":"LNT","version":"Re:Fresh","date_added":"20260723","lev_lnt":"14+","lev_lnt_i":"14.7"}
+	]`)
+	meta := defaultMusicExOverrideMeta()
+	merged, n, err := applyVersionSplitsToBody(raw, meta.VersionSplits)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("changed = %d, want 2 (Act.2 song + LNT)", n)
+	}
+	if got := extractField(t, merged, "旧ReFresh", "version"); got != "Re:Fresh" {
+		t.Errorf("旧ReFresh version = %q, want Re:Fresh", got)
+	}
+	if got := extractField(t, merged, "熱異常", "version"); got != "Re:Fresh Act.2" {
+		t.Errorf("熱異常 version = %q, want Re:Fresh Act.2", got)
+	}
+	if got := extractField(t, merged, "LNT", "version"); got != "Re:Fresh Act.2" {
+		t.Errorf("LNT version = %q, want Re:Fresh Act.2", got)
+	}
+}
+
+func TestParseOverridesBundle_ObjectMeta(t *testing.T) {
+	songs, meta, err := parseMusicExOverridesBundle([]byte(`{
+		"_meta": {
+			"new_song_versions": ["Re:Fresh Act.2"],
+			"version_splits": [
+				{"from":"Re:Fresh","to":"Re:Fresh Act.2","since":"20260723"}
+			]
+		},
+		"songs": [
+			{"title":"X","lev_mas_i":"14.0","force":true}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(songs) != 1 || songs[0].title != "X" {
+		t.Fatalf("songs = %+v, want one X", songs)
+	}
+	if len(meta.NewSongVersions) != 1 || meta.NewSongVersions[0] != "Re:Fresh Act.2" {
+		t.Errorf("NewSongVersions = %v", meta.NewSongVersions)
+	}
+	if len(meta.VersionSplits) != 1 || meta.VersionSplits[0].Since != "20260723" {
+		t.Errorf("VersionSplits = %+v", meta.VersionSplits)
+	}
+}

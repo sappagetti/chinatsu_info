@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { fetchMe } from "../api";
+import { fetchAppConfig, fetchMe } from "../api";
 import { useAuth } from "../auth/AuthContext";
 import { catalogConstByDifficulty, extractMusicCatalog, extractScoreRows, indexMusicCatalogById, resolveTrackJacketUrl } from "../lib/ratingView";
 import { fetchMusicExJson } from "../lib/musicExCache";
@@ -10,6 +10,7 @@ import {
   calcMainRate,
   calcPlatinumRate,
   calcRankBonus,
+  DEFAULT_NEW_SONG_VERSIONS,
   getLampForRating,
   isBonusTrackEntry,
   isNewCategorySong,
@@ -23,6 +24,7 @@ type RatedRow = IngestScoreRow & {
   rowId: string;
   resolvedConst: number;
   resolvedVersion: string;
+  catalogVersion: string;
   lampForRating: string;
   techRate: number;
   platRate: number;
@@ -54,22 +56,29 @@ const PLAT_COUNT = 50;
 const musicExUrl = import.meta.env.VITE_BEATMAP_BUCKET_URL?.trim() ?? "";
 const SIM_STORAGE_PREFIX = "rating-sim-v1";
 
-function calcTotalRating(rows: RatedRow[]): CalcSummary {
-  const newPool = rows.filter((r) => isNewCategorySong(r.resolvedVersion)).sort((a, b) => b.techRate - a.techRate || b.technicalHighScore - a.technicalHighScore);
-  const oldPool = rows.filter((r) => !isNewCategorySong(r.resolvedVersion)).sort((a, b) => b.techRate - a.techRate || b.technicalHighScore - a.technicalHighScore);
+function isNewRow(r: RatedRow, newSongVersions: readonly string[]): boolean {
+  return isNewCategorySong(r.resolvedVersion, {
+    catalogVersion: r.catalogVersion,
+    newSongVersions,
+  });
+}
+
+function calcTotalRating(rows: RatedRow[], newSongVersions: readonly string[]): CalcSummary {
+  const newPool = rows.filter((r) => isNewRow(r, newSongVersions)).sort((a, b) => b.techRate - a.techRate || b.technicalHighScore - a.technicalHighScore);
+  const oldPool = rows.filter((r) => !isNewRow(r, newSongVersions)).sort((a, b) => b.techRate - a.techRate || b.technicalHighScore - a.technicalHighScore);
   const platPool = rows.filter((r) => r.platinumHighScore > 0).sort((a, b) => b.platRate - a.platRate || b.platinumStar - a.platinumStar);
   const newContrib = Math.floor(((newPool.slice(0, NEW_COUNT).reduce((a, r) => a + r.techRate, 0) / NEW_COUNT) / 5) * 1000) / 1000;
   const oldContrib = Math.floor((oldPool.slice(0, OLD_COUNT).reduce((a, r) => a + r.techRate, 0) / OLD_COUNT) * 1000) / 1000;
   const platContrib = Math.floor((platPool.slice(0, PLAT_COUNT).reduce((a, r) => a + r.platRate, 0) / PLAT_COUNT) * 1000) / 1000;
   return { total: Math.floor((newContrib + oldContrib + platContrib) * 1000) / 1000, newContrib, oldContrib, platContrib };
 }
-function getTargetPools(rows: RatedRow[]): TargetPools {
+function getTargetPools(rows: RatedRow[], newSongVersions: readonly string[]): TargetPools {
   const newTop = rows
-    .filter((r) => isNewCategorySong(r.resolvedVersion))
+    .filter((r) => isNewRow(r, newSongVersions))
     .sort((a, b) => b.techRate - a.techRate || b.technicalHighScore - a.technicalHighScore)
     .slice(0, NEW_COUNT);
   const oldTop = rows
-    .filter((r) => !isNewCategorySong(r.resolvedVersion))
+    .filter((r) => !isNewRow(r, newSongVersions))
     .sort((a, b) => b.techRate - a.techRate || b.technicalHighScore - a.technicalHighScore)
     .slice(0, OLD_COUNT);
   const platTop = rows
@@ -87,6 +96,8 @@ export function RatingSimulatorPage() {
   const [err, setErr] = useState<string | null>(null);
   const [payload, setPayload] = useState<Record<string, unknown> | null>(null);
   const [constMap, setConstMap] = useState<Map<string, number>>(new Map());
+  const [versionMap, setVersionMap] = useState<Map<string, string>>(new Map());
+  const [newSongVersions, setNewSongVersions] = useState<readonly string[]>([...DEFAULT_NEW_SONG_VERSIONS]);
   const [scenarioMap, setScenarioMap] = useState<Record<string, ScenarioPatch>>({});
   const [constFilter, setConstFilter] = usePersistedState<string>("rating-sim.constFilter", "15+", {
     validate: (v) => typeof v === "string",
@@ -124,10 +135,30 @@ export function RatingSimulatorPage() {
       try {
         if (!musicExUrl) return;
         const data = await fetchMusicExJson(musicExUrl);
-        const { constMap: cm } = buildMusicExIndex(data);
-        if (!cancelled) setConstMap(cm);
+        const { constMap: cm, versionMap: vm } = buildMusicExIndex(data);
+        if (!cancelled) {
+          setConstMap(cm);
+          setVersionMap(vm);
+        }
       } catch {
         // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const cfg = await fetchAppConfig();
+        if (!cancelled && Array.isArray(cfg.new_song_versions) && cfg.new_song_versions.length > 0) {
+          setNewSongVersions(cfg.new_song_versions);
+        }
+      } catch {
+        // keep DEFAULT_NEW_SONG_VERSIONS
       }
     })();
     return () => {
@@ -160,11 +191,15 @@ export function RatingSimulatorPage() {
       const techRate = resolvedConst > 0 ? calcMainRate(resolvedConst, r.technicalHighScore) + calcRankBonus(r.technicalHighScore) + calcLampBonus(lamp) : 0;
       const platRate = resolvedConst > 0 ? calcPlatinumRate(resolvedConst, r.platinumStar) : 0;
       const stableRowID = r.music_ex_id?.trim() ? `${r.music_ex_id}:${r.difficulty}` : `${r.name}-${r.difficulty}-${i}`;
-      // score-row version only — do not fill from catalog (otoge-db tags Act.2 as "Re:Fresh").
       const resolvedVersion = (r.version && r.version.trim()) || "";
-      return { ...r, rowId: stableRowID, resolvedConst, resolvedVersion, lampForRating: lamp, techRate, platRate, inferredFullCombo };
+      // 서버 music-ex (Act.2 재태깅) 우선. payload catalog 는 옛 Re:Fresh 일 수 있음.
+      const catalogVersion =
+        versionMap.get(key) ||
+        (typeof byID?.version === "string" && byID.version.trim()) ||
+        "";
+      return { ...r, rowId: stableRowID, resolvedConst, resolvedVersion, catalogVersion, lampForRating: lamp, techRate, platRate, inferredFullCombo };
     });
-  }, [payload, constMap, catalogByID]);
+  }, [payload, constMap, versionMap, catalogByID]);
 
   const scenarioEntries = useMemo(
     () =>
@@ -282,7 +317,7 @@ export function RatingSimulatorPage() {
     });
   }, [baseRows]);
 
-  const currentSummary = useMemo(() => calcTotalRating(baseRows), [baseRows]);
+  const currentSummary = useMemo(() => calcTotalRating(baseRows, newSongVersions), [baseRows, newSongVersions]);
   const simulatedRows = useMemo(() => {
     if (scenarioEntries.length === 0) return baseRows;
     const patchMap = new Map<string, ScenarioPatch>();
@@ -304,9 +339,9 @@ export function RatingSimulatorPage() {
       return { ...r, technicalHighScore, allBreak, fullBell, inferredFullCombo, platinumHighScore, platinumStar, lampForRating: lamp, techRate, platRate };
     });
   }, [baseRows, scenarioEntries]);
-  const simulatedSummary = useMemo(() => calcTotalRating(simulatedRows), [simulatedRows]);
-  const currentPools = useMemo(() => getTargetPools(baseRows), [baseRows]);
-  const simulatedPools = useMemo(() => getTargetPools(simulatedRows), [simulatedRows]);
+  const simulatedSummary = useMemo(() => calcTotalRating(simulatedRows, newSongVersions), [simulatedRows, newSongVersions]);
+  const currentPools = useMemo(() => getTargetPools(baseRows, newSongVersions), [baseRows, newSongVersions]);
+  const simulatedPools = useMemo(() => getTargetPools(simulatedRows, newSongVersions), [simulatedRows, newSongVersions]);
   const targetDiff = useMemo(() => {
     const calc = (before: RatedRow[], after: RatedRow[]) => {
       const beforeMap = new Map(before.map((r) => [r.rowId, r]));

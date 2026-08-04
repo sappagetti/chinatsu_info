@@ -199,6 +199,16 @@ export async function fetchRatingTargets(token: string): Promise<RatingTargetsRe
   return res.json() as Promise<RatingTargetsResponse>;
 }
 
+export type AppConfig = {
+  new_song_versions: string[];
+};
+
+export async function fetchAppConfig(): Promise<AppConfig> {
+  const res = await fetch(`${base}/api/v1/config`, { credentials: "include" });
+  if (!res.ok) throw new Error(`config failed: ${res.status}`);
+  return res.json() as Promise<AppConfig>;
+}
+
 /** POST /api/v1/bookmarklet-session — 짧은 북마크릿용 일회(시간 제한) 세션 ID 발급 */
 export async function createBookmarkletSession(
   token: string,

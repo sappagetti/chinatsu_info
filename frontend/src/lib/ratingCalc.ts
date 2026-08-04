@@ -55,21 +55,30 @@ export function parseConst(v: unknown): number | undefined {
 }
 
 /**
- * 게임의 "신곡 카테고리" (최신 확장의 신곡 풀) 에 속하는지 판정한다.
+ * 게임의 "신곡 카테고리" (최신 Act 신곡 풀) 에 속하는지 판정한다.
  *
- * SEGA bookmarklet score payload 는 최신 확장 신곡(예: Re:Fresh Act.2)의
- * `version` 을 한동안 비운다. 이전 확장 곡은 이미 비어 있지 않은 값
- * (예: "Re:Fresh") 을 가진다. 게임 안의 "신곡 카테고리" 판정도 이 시점을
- * 기준으로 동작하므로, score-row `version` 이 비어있으면 신곡으로 본다.
- *
- * 호출 시 music-ex / otoge-db catalog 의 version 으로 빈 score version 을
- * 채우지 말 것. upstream 은 Act.2 도 당분간 `version="Re:Fresh"` 로 태깅해
- * 두기 때문에 catalog fallback 을 쓰면 신곡 pool 이 0이 된다.
+ * 판정 우선순위:
+ *  1) score-row version 이 비어있으면 신곡 (SEGA 미태깅 공백)
+ *  2) score-row version 이 newSongVersions 에 있으면 신곡
+ *  3) catalog version 이 newSongVersions 에 있으면 신곡
+ *     (북마크릿이 otoge-db "Re:Fresh" 를 찍어도, 서버가 Act.2 로 재태깅한
+ *      music-ex catalog 로 복구)
  *
  * 백엔드 `isNewCategorySong` (rating_targets.go) 와 시맨틱을 맞출 것.
  */
-export function isNewCategorySong(version: string | undefined): boolean {
-  return (version ?? "").trim() === "";
+export const DEFAULT_NEW_SONG_VERSIONS = ["Re:Fresh Act.2"] as const;
+
+export function isNewCategorySong(
+  scoreVersion: string | undefined,
+  opts?: { catalogVersion?: string; newSongVersions?: readonly string[] },
+): boolean {
+  const news = opts?.newSongVersions ?? DEFAULT_NEW_SONG_VERSIONS;
+  const sv = (scoreVersion ?? "").trim();
+  if (sv === "") return true;
+  if (news.includes(sv)) return true;
+  const cv = (opts?.catalogVersion ?? "").trim();
+  if (cv && news.includes(cv)) return true;
+  return false;
 }
 
 /**
