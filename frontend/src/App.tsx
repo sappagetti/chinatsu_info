@@ -17,6 +17,7 @@ import { ResendVerificationPage } from "./pages/ResendVerificationPage";
 import { AccountSettingsPage } from "./pages/AccountSettingsPage";
 import { TermsPage } from "./pages/TermsPage";
 import { RatingSimulatorPage } from "./pages/RatingSimulatorPage";
+import { ConstOverridePage } from "./pages/ConstOverridePage";
 
 export default function App() {
   const { user, logout } = useAuth();
@@ -70,6 +71,7 @@ export default function App() {
             {user && <NavLink to="/achievement" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>レコード</NavLink>}
             {user && <NavLink to="/rating-sim" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>目標計算</NavLink>}
             <NavLink to="/songs" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>楽曲データ</NavLink>
+            {user && <NavLink to="/const-override" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>定数入力</NavLink>}
             {user ? (
               <>
                 <NavLink to="/account" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>プロフィール</NavLink>
@@ -103,6 +105,7 @@ export default function App() {
           <Route path="/achievement" element={<RequireAuth><AchievementBoardPage /></RequireAuth>} />
           <Route path="/rating-sim" element={<RequireAuth><RatingSimulatorPage /></RequireAuth>} />
           <Route path="/account" element={<RequireAuth><AccountSettingsPage /></RequireAuth>} />
+          <Route path="/const-override" element={<RequireAuth><ConstOverridePage /></RequireAuth>} />
           <Route path="/songs" element={<SongCatalogPage />} />
           <Route path="/policy" element={<PolicyPage />} />
           <Route path="/terms" element={<TermsPage />} />

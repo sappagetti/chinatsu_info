@@ -20,6 +20,13 @@ data/
 *.db-wal
 *.db-shm
 
+# music-ex override / cache (서버 로컬 전용 — 보면정수 수동 입력 포함, 커밋 금지)
+**/music-ex-overrides.json
+**/music-ex-overrides.json.bak
+**/music-ex-overrides.json.tmp
+**/music-ex.json
+**/music-ex.json.tmp
+
 # Environment / secrets
 .env
 .env.*

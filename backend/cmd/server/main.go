@@ -125,6 +125,8 @@ func main() {
 		r.Get("/bookmarklet.js", handleBookmarkletScript())
 		r.Get("/rating-targets", handleRatingTargets(st, musicEx))
 		r.Get("/config", handleAppConfig(musicEx))
+		r.Get("/music-ex-overrides", handleMusicExOverridesGet(a, musicEx))
+		r.Post("/music-ex-overrides/merge", handleMusicExOverridesMerge(a, musicEx))
 		// music-ex.json 미러. 프론트는 VITE_BEATMAP_BUCKET_URL 로 이 경로를 가리킨다.
 		r.Get("/music-ex.json", musicEx.serveHTTP())
 		r.Head("/music-ex.json", musicEx.serveHTTP())

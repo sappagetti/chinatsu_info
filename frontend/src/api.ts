@@ -209,6 +209,34 @@ export async function fetchAppConfig(): Promise<AppConfig> {
   return res.json() as Promise<AppConfig>;
 }
 
+export type MusicExOverrideSong = Record<string, string | boolean | undefined> & {
+  title?: string;
+  id?: string;
+};
+
+export async function fetchMusicExOverrides(): Promise<{ songs: MusicExOverrideSong[]; count: number }> {
+  const res = await fetch(`${base}/api/v1/music-ex-overrides`, { credentials: "include" });
+  if (!res.ok) throw new Error(`overrides get failed: ${res.status}`);
+  return res.json() as Promise<{ songs: MusicExOverrideSong[]; count: number }>;
+}
+
+export async function mergeMusicExOverrides(
+  songs: MusicExOverrideSong[],
+  force = false,
+): Promise<{ upserted: number; override_count: number; ok: boolean }> {
+  const res = await fetch(`${base}/api/v1/music-ex-overrides/merge`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ songs, force }),
+  });
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("ログインが必要です。");
+    throw new Error(`overrides merge failed: ${res.status}`);
+  }
+  return res.json() as Promise<{ upserted: number; override_count: number; ok: boolean }>;
+}
+
 /** POST /api/v1/bookmarklet-session — 짧은 북마크릿용 일회(시간 제한) 세션 ID 발급 */
 export async function createBookmarkletSession(
   token: string,
