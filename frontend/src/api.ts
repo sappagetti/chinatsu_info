@@ -151,6 +151,7 @@ export async function authMe() {
     display_name: string;
     email_verified: boolean;
     ingest_token: string;
+    can_edit_const_overrides?: boolean;
   }>;
 }
 

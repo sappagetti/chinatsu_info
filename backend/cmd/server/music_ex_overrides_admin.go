@@ -1,5 +1,8 @@
 // music-ex-overrides.json 을 로그인 사용자가 웹/API 로 갱신하기 위한 핸들러.
 // docker cp 없이 Windows 브라우저에서 보면정수를 바로 반영하기 위함.
+//
+// 권한: 환경변수 CONST_OVERRIDE_ADMIN_EMAILS (콤마 구분 이메일) 에 등록된
+// 계정만 GET/POST 가능. 미설정이면 전원 거부.
 package main
 
 import (
@@ -10,7 +13,37 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/rhythm-info/backend/internal/store"
 )
+
+// constOverrideAdminEmails: CONST_OVERRIDE_ADMIN_EMAILS 를 소문자 trim 집합으로.
+func constOverrideAdminEmails() map[string]struct{} {
+	raw := strings.TrimSpace(os.Getenv("CONST_OVERRIDE_ADMIN_EMAILS"))
+	out := map[string]struct{}{}
+	if raw == "" {
+		return out
+	}
+	for _, p := range strings.Split(raw, ",") {
+		e := strings.ToLower(strings.TrimSpace(p))
+		if e != "" {
+			out[e] = struct{}{}
+		}
+	}
+	return out
+}
+
+func isConstOverrideAdmin(u *store.User) bool {
+	if u == nil {
+		return false
+	}
+	admins := constOverrideAdminEmails()
+	if len(admins) == 0 {
+		return false
+	}
+	_, ok := admins[strings.ToLower(strings.TrimSpace(u.Email))]
+	return ok
+}
 
 // handleMusicExOverridesMerge: POST /api/v1/music-ex-overrides/merge
 //
@@ -20,13 +53,18 @@ import (
 // 즉시 applyOverrides() 한다.
 func handleMusicExOverridesMerge(a *app, mc *musicExCache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := a.userFromSession(r); !ok {
+		u, ok := a.userFromSession(r)
+		if !ok {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !isConstOverrideAdmin(u) {
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		var body struct {
 			Songs []map[string]any `json:"songs"`
-			Force bool             `json:"force"` // 요청 전체 기본 force (entry 별 force 가 우선)
+			Force bool             `json:"force"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
@@ -51,11 +89,15 @@ func handleMusicExOverridesMerge(a *app, mc *musicExCache) http.HandlerFunc {
 }
 
 // handleMusicExOverridesGet: GET /api/v1/music-ex-overrides
-// 현재 override songs 목록 (관리 페이지 미리보기용).
 func handleMusicExOverridesGet(a *app, mc *musicExCache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := a.userFromSession(r); !ok {
+		u, ok := a.userFromSession(r)
+		if !ok {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !isConstOverrideAdmin(u) {
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		raw, meta, err := mc.ReadOverridesRaw()
@@ -106,7 +148,6 @@ func (c *musicExCache) MergeOverrideSongs(incoming []map[string]any, defaultForc
 			continue
 		}
 		if idx, ok := byKey[k]; ok {
-			// 기존 entry 위에 필드 병합 (빈 값으로 지우지 않음)
 			for fk, fv := range entry {
 				if fk == "title" || fk == "id" {
 					existing[idx][fk] = fv
@@ -179,11 +220,10 @@ func readOverridesBundleFile(path string) ([]map[string]any, musicExOverrideMeta
 	if len(strings.TrimSpace(string(b))) == 0 {
 		return []map[string]any{}, meta, nil
 	}
-	songs, meta2, err := parseMusicExOverridesBundle(b)
+	_, meta2, err := parseMusicExOverridesBundle(b)
 	if err != nil {
 		return nil, meta, err
 	}
-	// parse 결과는 typed entry — raw map 으로 다시 읽어 UI/머지에 쓰기 쉽게.
 	trimmed := strings.TrimSpace(string(b))
 	if len(trimmed) > 0 && trimmed[0] == '{' {
 		var obj struct {
@@ -195,7 +235,6 @@ func readOverridesBundleFile(path string) ([]map[string]any, musicExOverrideMeta
 		if obj.Songs == nil {
 			obj.Songs = []map[string]any{}
 		}
-		_ = songs
 		return obj.Songs, meta2, nil
 	}
 	var arr []map[string]any
@@ -212,9 +251,6 @@ func writeOverridesBundleFile(path string, songs []map[string]any, meta musicExO
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	// 기존이 object+_meta 였으면 유지, 아니면 레거시 배열 유지.
-	// meta 커스텀 여부는 NewSongVersions/VersionSplits 가 기본과 다른지로 판단하지 않고
-	// 파일이 원래 object 였는지만 본다.
 	keepObject := false
 	if b, err := os.ReadFile(path); err == nil {
 		t := strings.TrimSpace(string(b))

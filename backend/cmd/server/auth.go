@@ -257,12 +257,13 @@ func (a *app) handleAuthMe() http.HandlerFunc {
 			setCookie(w, auth.CsrfCookieName, csrf, 3600, false)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"user_id":        u.ID,
-			"public_id":      u.PublicID,
-			"email":          u.Email,
-			"display_name":   u.DisplayName,
-			"email_verified": u.EmailVerifiedAt != nil,
-			"ingest_token":   u.IngestToken,
+			"user_id":                 u.ID,
+			"public_id":               u.PublicID,
+			"email":                   u.Email,
+			"display_name":            u.DisplayName,
+			"email_verified":          u.EmailVerifiedAt != nil,
+			"ingest_token":            u.IngestToken,
+			"can_edit_const_overrides": isConstOverrideAdmin(u),
 		})
 	}
 }

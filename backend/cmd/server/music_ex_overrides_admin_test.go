@@ -5,7 +5,23 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/rhythm-info/backend/internal/store"
 )
+
+func TestIsConstOverrideAdmin(t *testing.T) {
+	t.Setenv("CONST_OVERRIDE_ADMIN_EMAILS", "Admin@Example.com, other@x.com")
+	if !isConstOverrideAdmin(&store.User{Email: "admin@example.com"}) {
+		t.Fatal("expected admin match (case-insensitive)")
+	}
+	if isConstOverrideAdmin(&store.User{Email: "nobody@example.com"}) {
+		t.Fatal("expected non-admin")
+	}
+	t.Setenv("CONST_OVERRIDE_ADMIN_EMAILS", "")
+	if isConstOverrideAdmin(&store.User{Email: "admin@example.com"}) {
+		t.Fatal("empty env must deny everyone")
+	}
+}
 
 func TestMergeOverrideSongs_UpsertByTitle(t *testing.T) {
 	dir := t.TempDir()

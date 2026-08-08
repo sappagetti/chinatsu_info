@@ -8,6 +8,8 @@ type AuthUser = {
   display_name: string;
   email_verified: boolean;
   ingest_token: string;
+  /** 서버 CONST_OVERRIDE_ADMIN_EMAILS 에 등록된 계정만 true */
+  can_edit_const_overrides?: boolean;
 };
 
 type AuthContextType = {

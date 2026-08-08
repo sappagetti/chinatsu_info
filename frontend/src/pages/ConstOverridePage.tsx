@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
+import { Navigate } from "react-router-dom";
 import { mergeMusicExOverrides } from "../api";
+import { useAuth } from "../auth/AuthContext";
 import { fetchMusicExJson } from "../lib/musicExCache";
 import { parseConstOverridePaste } from "../lib/constOverrideParse";
 
@@ -13,6 +15,7 @@ Cthugha	EXPERT	12	12.6
 アルメリアの鳥籠	EXPERT	12	12.2`;
 
 export function ConstOverridePage() {
+  const { user } = useAuth();
   const [text, setText] = useState("");
   const [force, setForce] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -20,6 +23,10 @@ export function ConstOverridePage() {
   const [err, setErr] = useState<string | null>(null);
 
   const preview = useMemo(() => parseConstOverridePaste(text, force), [text, force]);
+
+  if (!user?.can_edit_const_overrides) {
+    return <Navigate to="/" replace />;
+  }
 
   async function onSubmit() {
     setBusy(true);

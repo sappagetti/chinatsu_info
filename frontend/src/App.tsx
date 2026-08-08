@@ -71,7 +71,9 @@ export default function App() {
             {user && <NavLink to="/achievement" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>レコード</NavLink>}
             {user && <NavLink to="/rating-sim" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>目標計算</NavLink>}
             <NavLink to="/songs" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>楽曲データ</NavLink>
-            {user && <NavLink to="/const-override" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>定数入力</NavLink>}
+            {user?.can_edit_const_overrides ? (
+              <NavLink to="/const-override" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>定数入力</NavLink>
+            ) : null}
             {user ? (
               <>
                 <NavLink to="/account" className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>プロフィール</NavLink>
