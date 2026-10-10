@@ -1,0 +1,77 @@
+name: Renew TLS (ACME)
+
+# Host nginx was redirecting /.well-known/acme-challenge/ to HTTPS (and then to the
+# SPA), so Let's Encrypt HTTP-01 renewals never landed a new cert. This workflow
+# re-applies the repo nginx site config, renews via webroot when needed, and runs
+# on a schedule so silent timer failures show up in Actions.
+
+on:
+  schedule:
+    # Twice a week — LE certs last 90d; script renews when <30d remain.
+    - cron: "17 4 * * 1,4"
+  workflow_dispatch:
+    inputs:
+      force_renew:
+        description: "Force certbot renewal even if >30 days remain"
+        type: boolean
+        default: true
+
+concurrency:
+  group: renew-tls
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Copy TLS assets to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          source: "deploy/nginx/chinatsu.sappagetti.com.conf,scripts/vps-ensure-tls.sh"
+          target: ${{ secrets.DEPLOY_PATH }}/tls-bundle
+          overwrite: true
+
+      - name: Ensure nginx ACME path + renew certificate
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DOMAIN: chinatsu.sappagetti.com
+          CERTBOT_EMAIL: ${{ secrets.CERTBOT_EMAIL }}
+          FORCE_RENEW: ${{ github.event_name == 'workflow_dispatch' && inputs.force_renew && '1' || '0' }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          envs: DEPLOY_PATH,FORCE_RENEW,CERTBOT_EMAIL,DOMAIN
+          script_stop: true
+          script: |
+            set -eu
+            cd "$DEPLOY_PATH"
+
+            CONF="tls-bundle/deploy/nginx/${DOMAIN}.conf"
+            SCRIPT="tls-bundle/scripts/vps-ensure-tls.sh"
+            if [ ! -f "$CONF" ] || [ ! -f "$SCRIPT" ]; then
+              echo "::error::unexpected tls-bundle layout"; find tls-bundle -type f || true; exit 1
+            fi
+            chmod +x "$SCRIPT"
+
+            DOMAIN="${DOMAIN}" \
+            CERTBOT_EMAIL="${CERTBOT_EMAIL:-}" \
+            FORCE_RENEW="${FORCE_RENEW:-0}" \
+            NGINX_CONF_SRC="$DEPLOY_PATH/$CONF" \
+            bash "$SCRIPT"
+
+            echo "--- public cert check ---"
+            echo | openssl s_client -connect "${DOMAIN}:443" -servername "${DOMAIN}" 2>/dev/null \
+              | openssl x509 -noout -dates -subject -issuer
