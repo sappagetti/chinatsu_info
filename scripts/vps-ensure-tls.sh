@@ -76,8 +76,6 @@ enable_site_if_needed() {
       sudo_run ln -sfn "${target}" "${link}"
     fi
     # Ubuntu default site often catches :80/:443 first and 301s ACME to HTTPS.
-    # If it mentions our domain (or is a catch-all still enabled), disable it after
-    # backing up the symlink name so an operator can restore it.
     if [[ -e /etc/nginx/sites-enabled/default ]]; then
       log "disabling /etc/nginx/sites-enabled/default to avoid ACME redirect conflicts"
       if [[ "${DRY_RUN}" != "1" ]]; then
@@ -85,6 +83,29 @@ enable_site_if_needed() {
       fi
     fi
   fi
+}
+
+retire_conflicting_server_names() {
+  # nginx keeps the *first* server_name match and ignores later duplicates
+  # ("conflicting server name ... ignored"). An older conf.d/sites-enabled
+  # file that 301s ACME would win forever unless we move it aside.
+  local keep="$1"
+  local keep_real
+  keep_real="$(readlink -f "${keep}" 2>/dev/null || echo "${keep}")"
+  local f real
+  while IFS= read -r -d '' f; do
+    real="$(readlink -f "${f}" 2>/dev/null || echo "${f}")"
+    [[ "${real}" == "${keep_real}" ]] && continue
+    case "${f}" in
+      *.bak|*.disabled|*.rpmnew|*.dpkg-*) continue ;;
+    esac
+    if sudo grep -Eq "server_name[[:space:]]+([^;]*[[:space:]])?${DOMAIN}([[:space:;]]|$)" "${f}" 2>/dev/null; then
+      log "retiring conflicting nginx config: ${f} → ${f}.bak"
+      if [[ "${DRY_RUN}" != "1" ]]; then
+        sudo mv -f "${f}" "${f}.bak"
+      fi
+    fi
+  done < <(sudo find /etc/nginx -type f \( -name '*.conf' -o -name 'default' \) -print0 2>/dev/null)
 }
 
 ensure_certbot_packages() {
@@ -144,6 +165,7 @@ EOF
   fi
   rm -f "${tmp}"
   enable_site_if_needed "${target}"
+  retire_conflicting_server_names "${target}"
   sudo_run nginx -t
   sudo_run systemctl reload nginx
 }
@@ -173,6 +195,7 @@ install_nginx_site() {
     sudo install -m 0644 "${NGINX_CONF_SRC}" "${target}"
   fi
   enable_site_if_needed "${target}"
+  retire_conflicting_server_names "${target}"
   sudo_run nginx -t
   sudo_run systemctl reload nginx
 }
