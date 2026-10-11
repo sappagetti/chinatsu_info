@@ -298,7 +298,7 @@ issue_or_renew() {
   if [[ -n "${CERTBOT_EMAIL}" ]]; then
     args+=(--email "${CERTBOT_EMAIL}")
   elif ! live_cert_exists; then
-    die "CERTBOT_EMAIL is required for first certificate issuance (set GitHub secret CERTBOT_EMAIL)"
+    die "CERTBOT_EMAIL is required for first certificate issuance"
   fi
 
   local days
