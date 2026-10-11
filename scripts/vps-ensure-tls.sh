@@ -56,6 +56,23 @@ sudo_run() {
   fi
 }
 
+# /etc/letsencrypt/live is typically mode 0700 — deploy cannot -f it without sudo.
+root_test() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    test "$@"
+  else
+    sudo test "$@"
+  fi
+}
+
+live_cert_path() {
+  echo "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+}
+
+live_cert_exists() {
+  root_test -f "$(live_cert_path)"
+}
+
 detect_nginx_target() {
   if [[ -d /etc/nginx/sites-available ]]; then
     echo "/etc/nginx/sites-available/${DOMAIN}.conf"
@@ -172,13 +189,12 @@ EOF
 
 install_nginx_site() {
   [[ -f "${NGINX_CONF_SRC}" ]] || die "nginx config not found: ${NGINX_CONF_SRC}"
-  local target live
+  local target
   target="$(detect_nginx_target)"
-  live="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
 
   sudo_run mkdir -p "${WEBROOT}/.well-known/acme-challenge"
 
-  if [[ ! -f "${live}" ]]; then
+  if ! live_cert_exists; then
     log "no live cert yet — installing HTTP-only bootstrap for ACME"
     write_http_bootstrap_config "${target}"
     return
@@ -223,13 +239,14 @@ probe_acme_path() {
 }
 
 cert_days_remaining() {
-  local pem="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
-  if [[ ! -f "${pem}" ]]; then
+  local pem
+  pem="$(live_cert_path)"
+  if ! root_test -f "${pem}"; then
     echo "-1"
     return
   fi
   local end
-  end="$(openssl x509 -enddate -noout -in "${pem}" | cut -d= -f2)"
+  end="$(sudo openssl x509 -enddate -noout -in "${pem}" | cut -d= -f2)"
   local end_epoch now_epoch
   end_epoch="$(date -d "${end}" +%s)"
   now_epoch="$(date +%s)"
@@ -237,22 +254,24 @@ cert_days_remaining() {
 }
 
 pin_renewal_webroot() {
-  # Ensure certbot.timer renewals keep using webroot (not nginx authenticator).
-  # certonly --webroot usually rewrites this; we still pin in case an older
-  # nginx-plugin lineage left authenticator=nginx behind.
+  # Ensure certbot.timer renewals keep using webroot (not nginx/standalone).
+  # After an emergency --standalone renew, renewal.conf often stays on
+  # authenticator=standalone, which fails while nginx holds :80.
   local renewal="/etc/letsencrypt/renewal/${DOMAIN}.conf"
-  if [[ ! -f "${renewal}" || "${DRY_RUN}" == "1" ]]; then
+  if ! root_test -f "${renewal}" || [[ "${DRY_RUN}" == "1" ]]; then
     return
   fi
   log "pinning renewal config to webroot (${WEBROOT})"
-  sudo sed -i 's/^authenticator[[:space:]]*=.*/authenticator = webroot/' "${renewal}"
-  sudo sed -i '/^installer[[:space:]]*=/d' "${renewal}"
-  if grep -q '^webroot_path' "${renewal}"; then
+  sudo sed -i \
+    -e 's/^authenticator[[:space:]]*=.*/authenticator = webroot/' \
+    -e '/^installer[[:space:]]*=/d' \
+    "${renewal}"
+  if sudo grep -q '^webroot_path' "${renewal}"; then
     sudo sed -i "s|^webroot_path[[:space:]]*=.*|webroot_path = ${WEBROOT},|" "${renewal}"
   else
     sudo sed -i "/^\[renewalparams\]/a webroot_path = ${WEBROOT}," "${renewal}"
   fi
-  if grep -q '^\[\[webroot_map\]\]' "${renewal}"; then
+  if sudo grep -q '^\[\[webroot_map\]\]' "${renewal}"; then
     sudo sed -i "s|^${DOMAIN}[[:space:]]*=.*|${DOMAIN} = ${WEBROOT}|" "${renewal}"
   else
     printf '\n[[webroot_map]]\n%s = %s\n' "${DOMAIN}" "${WEBROOT}" | sudo tee -a "${renewal}" >/dev/null
@@ -261,12 +280,11 @@ pin_renewal_webroot() {
 
 issue_or_renew() {
   need_cmd certbot
-  local live="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
   local args=(certonly --webroot -w "${WEBROOT}" -d "${DOMAIN}" --non-interactive --agree-tos)
 
   if [[ -n "${CERTBOT_EMAIL}" ]]; then
     args+=(--email "${CERTBOT_EMAIL}")
-  elif [[ ! -f "${live}" ]]; then
+  elif ! live_cert_exists; then
     die "CERTBOT_EMAIL is required for first certificate issuance (set GitHub secret CERTBOT_EMAIL)"
   fi
 
@@ -274,7 +292,7 @@ issue_or_renew() {
   days="$(cert_days_remaining)"
   log "certificate days remaining: ${days}"
 
-  if [[ ! -f "${live}" ]]; then
+  if ! live_cert_exists; then
     log "no existing cert — issuing via webroot"
     sudo_run certbot "${args[@]}"
   elif [[ "${FORCE_RENEW}" == "1" || "${days}" -lt 30 ]]; then
@@ -318,8 +336,7 @@ EOF
 
 reload_full_site_if_needed() {
   # After first issuance, swap HTTP bootstrap for the full TLS site config.
-  local live="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
-  [[ -f "${live}" ]] || return 0
+  live_cert_exists || return 0
   [[ "${SKIP_NGINX_INSTALL}" == "1" ]] && return 0
   [[ -f "${NGINX_CONF_SRC}" ]] || return 0
 
@@ -335,6 +352,7 @@ reload_full_site_if_needed() {
     sudo install -m 0644 "${NGINX_CONF_SRC}" "${target}"
   fi
   enable_site_if_needed "${target}"
+  retire_conflicting_server_names "${target}"
   sudo_run nginx -t
   sudo_run systemctl reload nginx
 }
