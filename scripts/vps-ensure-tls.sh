@@ -219,22 +219,35 @@ install_nginx_site() {
 probe_acme_path() {
   local token="chinatsu-acme-smoke-$$"
   local file="${WEBROOT}/.well-known/acme-challenge/${token}"
+  # Do not use a fixed /tmp path — a root-owned leftover makes curl fail with
+  # "client returned ERROR on write of 3 bytes" even when nginx returned "ok".
+  local out
+  out="$(mktemp "${TMPDIR:-/tmp}/acme-smoke.XXXXXX")"
   if [[ "${DRY_RUN}" == "1" ]]; then
     log "DRY_RUN: skip ACME path probe"
+    rm -f "${out}"
     return
   fi
   echo "ok" | sudo tee "${file}" >/dev/null
+  # nginx worker (http/www-data) must be able to read the token file.
+  sudo chmod 755 "${WEBROOT}" "${WEBROOT}/.well-known" "${WEBROOT}/.well-known/acme-challenge" 2>/dev/null || true
+  sudo chmod 644 "${file}"
   local code
-  code="$(curl -sS -o /tmp/acme-smoke.out -w '%{http_code}' --max-time 5 \
+  code="$(curl -sS -o "${out}" -w '%{http_code}' --max-time 5 \
     "http://127.0.0.1/.well-known/acme-challenge/${token}" \
     -H "Host: ${DOMAIN}" || true)"
   sudo rm -f "${file}"
   if [[ "${code}" != "200" ]]; then
+    log "ACME probe body: $(head -c 200 "${out}" | tr '\n' ' ')"
+    rm -f "${out}"
     die "ACME path probe failed (HTTP ${code}). /.well-known/acme-challenge/ must return 200 on :80 without redirect."
   fi
-  if ! grep -qx 'ok' /tmp/acme-smoke.out; then
+  if ! grep -qx 'ok' "${out}"; then
+    log "ACME probe body: $(head -c 200 "${out}" | tr '\n' ' ')"
+    rm -f "${out}"
     die "ACME path probe returned unexpected body (SPA/proxy leak?)"
   fi
+  rm -f "${out}"
   log "ACME path probe ok (HTTP 200, webroot body)"
 }
 
