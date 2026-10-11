@@ -328,7 +328,7 @@ enable_timer() {
     log "certbot.timer status: $(systemctl is-active certbot.timer 2>/dev/null || true)"
     systemctl list-timers --all 2>/dev/null | grep certbot || true
   else
-    log "certbot.timer not installed — relying on CI renew-tls workflow"
+    log "certbot.timer not installed — enable certbot-renew.timer (or certbot.timer) on this host"
   fi
 
   # Deploy-hook so successful renewals reload nginx without waiting for a reboot.
