@@ -56,6 +56,23 @@ sudo_run() {
   fi
 }
 
+# /etc/letsencrypt/live is typically mode 0700 — deploy cannot -f it without sudo.
+root_test() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    test "$@"
+  else
+    sudo test "$@"
+  fi
+}
+
+live_cert_path() {
+  echo "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+}
+
+live_cert_exists() {
+  root_test -f "$(live_cert_path)"
+}
+
 detect_nginx_target() {
   if [[ -d /etc/nginx/sites-available ]]; then
     echo "/etc/nginx/sites-available/${DOMAIN}.conf"
@@ -76,8 +93,6 @@ enable_site_if_needed() {
       sudo_run ln -sfn "${target}" "${link}"
     fi
     # Ubuntu default site often catches :80/:443 first and 301s ACME to HTTPS.
-    # If it mentions our domain (or is a catch-all still enabled), disable it after
-    # backing up the symlink name so an operator can restore it.
     if [[ -e /etc/nginx/sites-enabled/default ]]; then
       log "disabling /etc/nginx/sites-enabled/default to avoid ACME redirect conflicts"
       if [[ "${DRY_RUN}" != "1" ]]; then
@@ -85,6 +100,29 @@ enable_site_if_needed() {
       fi
     fi
   fi
+}
+
+retire_conflicting_server_names() {
+  # nginx keeps the *first* server_name match and ignores later duplicates
+  # ("conflicting server name ... ignored"). An older conf.d/sites-enabled
+  # file that 301s ACME would win forever unless we move it aside.
+  local keep="$1"
+  local keep_real
+  keep_real="$(readlink -f "${keep}" 2>/dev/null || echo "${keep}")"
+  local f real
+  while IFS= read -r -d '' f; do
+    real="$(readlink -f "${f}" 2>/dev/null || echo "${f}")"
+    [[ "${real}" == "${keep_real}" ]] && continue
+    case "${f}" in
+      *.bak|*.disabled|*.rpmnew|*.dpkg-*) continue ;;
+    esac
+    if sudo grep -Eq "server_name[[:space:]]+([^;]*[[:space:]])?${DOMAIN}([[:space:;]]|$)" "${f}" 2>/dev/null; then
+      log "retiring conflicting nginx config: ${f} → ${f}.bak"
+      if [[ "${DRY_RUN}" != "1" ]]; then
+        sudo mv -f "${f}" "${f}.bak"
+      fi
+    fi
+  done < <(sudo find /etc/nginx -type f \( -name '*.conf' -o -name 'default' \) -print0 2>/dev/null)
 }
 
 ensure_certbot_packages() {
@@ -144,19 +182,19 @@ EOF
   fi
   rm -f "${tmp}"
   enable_site_if_needed "${target}"
+  retire_conflicting_server_names "${target}"
   sudo_run nginx -t
   sudo_run systemctl reload nginx
 }
 
 install_nginx_site() {
   [[ -f "${NGINX_CONF_SRC}" ]] || die "nginx config not found: ${NGINX_CONF_SRC}"
-  local target live
+  local target
   target="$(detect_nginx_target)"
-  live="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
 
   sudo_run mkdir -p "${WEBROOT}/.well-known/acme-challenge"
 
-  if [[ ! -f "${live}" ]]; then
+  if ! live_cert_exists; then
     log "no live cert yet — installing HTTP-only bootstrap for ACME"
     write_http_bootstrap_config "${target}"
     return
@@ -173,6 +211,7 @@ install_nginx_site() {
     sudo install -m 0644 "${NGINX_CONF_SRC}" "${target}"
   fi
   enable_site_if_needed "${target}"
+  retire_conflicting_server_names "${target}"
   sudo_run nginx -t
   sudo_run systemctl reload nginx
 }
@@ -180,33 +219,47 @@ install_nginx_site() {
 probe_acme_path() {
   local token="chinatsu-acme-smoke-$$"
   local file="${WEBROOT}/.well-known/acme-challenge/${token}"
+  # Do not use a fixed /tmp path — a root-owned leftover makes curl fail with
+  # "client returned ERROR on write of 3 bytes" even when nginx returned "ok".
+  local out
+  out="$(mktemp "${TMPDIR:-/tmp}/acme-smoke.XXXXXX")"
   if [[ "${DRY_RUN}" == "1" ]]; then
     log "DRY_RUN: skip ACME path probe"
+    rm -f "${out}"
     return
   fi
   echo "ok" | sudo tee "${file}" >/dev/null
+  # nginx worker (http/www-data) must be able to read the token file.
+  sudo chmod 755 "${WEBROOT}" "${WEBROOT}/.well-known" "${WEBROOT}/.well-known/acme-challenge" 2>/dev/null || true
+  sudo chmod 644 "${file}"
   local code
-  code="$(curl -sS -o /tmp/acme-smoke.out -w '%{http_code}' --max-time 5 \
+  code="$(curl -sS -o "${out}" -w '%{http_code}' --max-time 5 \
     "http://127.0.0.1/.well-known/acme-challenge/${token}" \
     -H "Host: ${DOMAIN}" || true)"
   sudo rm -f "${file}"
   if [[ "${code}" != "200" ]]; then
+    log "ACME probe body: $(head -c 200 "${out}" | tr '\n' ' ')"
+    rm -f "${out}"
     die "ACME path probe failed (HTTP ${code}). /.well-known/acme-challenge/ must return 200 on :80 without redirect."
   fi
-  if ! grep -qx 'ok' /tmp/acme-smoke.out; then
+  if ! grep -qx 'ok' "${out}"; then
+    log "ACME probe body: $(head -c 200 "${out}" | tr '\n' ' ')"
+    rm -f "${out}"
     die "ACME path probe returned unexpected body (SPA/proxy leak?)"
   fi
+  rm -f "${out}"
   log "ACME path probe ok (HTTP 200, webroot body)"
 }
 
 cert_days_remaining() {
-  local pem="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
-  if [[ ! -f "${pem}" ]]; then
+  local pem
+  pem="$(live_cert_path)"
+  if ! root_test -f "${pem}"; then
     echo "-1"
     return
   fi
   local end
-  end="$(openssl x509 -enddate -noout -in "${pem}" | cut -d= -f2)"
+  end="$(sudo openssl x509 -enddate -noout -in "${pem}" | cut -d= -f2)"
   local end_epoch now_epoch
   end_epoch="$(date -d "${end}" +%s)"
   now_epoch="$(date +%s)"
@@ -214,22 +267,24 @@ cert_days_remaining() {
 }
 
 pin_renewal_webroot() {
-  # Ensure certbot.timer renewals keep using webroot (not nginx authenticator).
-  # certonly --webroot usually rewrites this; we still pin in case an older
-  # nginx-plugin lineage left authenticator=nginx behind.
+  # Ensure certbot.timer renewals keep using webroot (not nginx/standalone).
+  # After an emergency --standalone renew, renewal.conf often stays on
+  # authenticator=standalone, which fails while nginx holds :80.
   local renewal="/etc/letsencrypt/renewal/${DOMAIN}.conf"
-  if [[ ! -f "${renewal}" || "${DRY_RUN}" == "1" ]]; then
+  if ! root_test -f "${renewal}" || [[ "${DRY_RUN}" == "1" ]]; then
     return
   fi
   log "pinning renewal config to webroot (${WEBROOT})"
-  sudo sed -i 's/^authenticator[[:space:]]*=.*/authenticator = webroot/' "${renewal}"
-  sudo sed -i '/^installer[[:space:]]*=/d' "${renewal}"
-  if grep -q '^webroot_path' "${renewal}"; then
+  sudo sed -i \
+    -e 's/^authenticator[[:space:]]*=.*/authenticator = webroot/' \
+    -e '/^installer[[:space:]]*=/d' \
+    "${renewal}"
+  if sudo grep -q '^webroot_path' "${renewal}"; then
     sudo sed -i "s|^webroot_path[[:space:]]*=.*|webroot_path = ${WEBROOT},|" "${renewal}"
   else
     sudo sed -i "/^\[renewalparams\]/a webroot_path = ${WEBROOT}," "${renewal}"
   fi
-  if grep -q '^\[\[webroot_map\]\]' "${renewal}"; then
+  if sudo grep -q '^\[\[webroot_map\]\]' "${renewal}"; then
     sudo sed -i "s|^${DOMAIN}[[:space:]]*=.*|${DOMAIN} = ${WEBROOT}|" "${renewal}"
   else
     printf '\n[[webroot_map]]\n%s = %s\n' "${DOMAIN}" "${WEBROOT}" | sudo tee -a "${renewal}" >/dev/null
@@ -238,20 +293,19 @@ pin_renewal_webroot() {
 
 issue_or_renew() {
   need_cmd certbot
-  local live="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
   local args=(certonly --webroot -w "${WEBROOT}" -d "${DOMAIN}" --non-interactive --agree-tos)
 
   if [[ -n "${CERTBOT_EMAIL}" ]]; then
     args+=(--email "${CERTBOT_EMAIL}")
-  elif [[ ! -f "${live}" ]]; then
-    die "CERTBOT_EMAIL is required for first certificate issuance (set GitHub secret CERTBOT_EMAIL)"
+  elif ! live_cert_exists; then
+    die "CERTBOT_EMAIL is required for first certificate issuance"
   fi
 
   local days
   days="$(cert_days_remaining)"
   log "certificate days remaining: ${days}"
 
-  if [[ ! -f "${live}" ]]; then
+  if ! live_cert_exists; then
     log "no existing cert — issuing via webroot"
     sudo_run certbot "${args[@]}"
   elif [[ "${FORCE_RENEW}" == "1" || "${days}" -lt 30 ]]; then
@@ -274,7 +328,7 @@ enable_timer() {
     log "certbot.timer status: $(systemctl is-active certbot.timer 2>/dev/null || true)"
     systemctl list-timers --all 2>/dev/null | grep certbot || true
   else
-    log "certbot.timer not installed — relying on CI renew-tls workflow"
+    log "certbot.timer not installed — enable certbot-renew.timer (or certbot.timer) on this host"
   fi
 
   # Deploy-hook so successful renewals reload nginx without waiting for a reboot.
@@ -295,8 +349,7 @@ EOF
 
 reload_full_site_if_needed() {
   # After first issuance, swap HTTP bootstrap for the full TLS site config.
-  local live="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
-  [[ -f "${live}" ]] || return 0
+  live_cert_exists || return 0
   [[ "${SKIP_NGINX_INSTALL}" == "1" ]] && return 0
   [[ -f "${NGINX_CONF_SRC}" ]] || return 0
 
@@ -312,6 +365,7 @@ reload_full_site_if_needed() {
     sudo install -m 0644 "${NGINX_CONF_SRC}" "${target}"
   fi
   enable_site_if_needed "${target}"
+  retire_conflicting_server_names "${target}"
   sudo_run nginx -t
   sudo_run systemctl reload nginx
 }
